@@ -6,6 +6,11 @@
 .env
 .env.*
 !.env.example
+.venv/
+**/__pycache__/
+*.pyc
+*.egg-info/
+tools/bw25-validator/uv.lock
 
 # IDE/editor files
 /.idea/

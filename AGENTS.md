@@ -138,6 +138,9 @@ Latest checks passed:
 - `cargo fmt --all`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
+- `python3 -m py_compile tools/bw25-validator/src/bw25_validator/cli.py`
+- `uv run --project tools/bw25-validator python -c "import pypardiso"` (Linux x86_64)
+- `./scripts/run_bw25_validation.sh --report-dir reports/bw25-validation-smoke` (manual smoke, latest solve_one target)
 
 ### 2.5 Snapshot builder status (artifact-first)
 
@@ -179,6 +182,26 @@ Latest checks passed:
   - default `reports/full-run/run-<ts>.md`
   - includes total/worker-start/prepare/solve timing, plus merged `build_snapshot` and `build_and_compute_total`, job ids/status, matrix nnz summary, artifact metadata, log paths.
   - auto-discovers latest snapshot coverage report by `snapshot_id` and attaches build source metadata (`reused_snapshot`, `build_report_json`) into full-run report.
+
+### 2.6 Brightway25 validation path (manual-only)
+
+- Added standalone Python validator under `tools/bw25-validator`.
+- Validation is opt-in and never auto-runs in worker/job path.
+- Manual entrypoint:
+  - `scripts/run_bw25_validation.sh`
+- Current scope:
+  - validates `solve_one` jobs only
+  - loads snapshot from `lca_snapshot_artifacts` (`snapshot-hdf5:v1`)
+  - loads solve result from `lca_results.payload` or result artifact (`hdf5:v1`)
+  - reconstructs `M` in Python and runs Brightway `LCA(..., data_objs=[...])`
+  - compares Rust vs Brightway vectors (`x/g/h`) and writes report:
+    - `reports/bw25-validation/<result_id>.json`
+    - `reports/bw25-validation/<result_id>.md`
+- Validator package/runtime:
+  - `brightway25==1.1.1` (PyPI latest as of 2026-03-04)
+  - `bw2calc`, `bw_processing`, `numpy`, `scipy`, `h5py`, `psycopg`, `boto3`, `requests`
+  - `pypardiso>=0.4.6` auto-installed on `Linux x86_64` for faster Brightway sparse solve and to remove x64 warning
+  - runner prefers `uv run --project tools/bw25-validator`, falls back to local virtualenv install.
 
 ## 3. Architecture map
 
@@ -229,6 +252,19 @@ Latest checks passed:
 - `src/bin/snapshot_builder.rs`:
   - source-table extraction + `A/B/C` build + coverage + artifact upload + metadata persist
 
+### 3.4 `tools/bw25-validator` (manual validation tool)
+
+- `src/bw25_validator/cli.py`:
+  - resolves target result row (`--result-id` / `--job-id` / latest `solve_one`)
+  - reads snapshot/result artifacts and decodes HDF5 envelopes
+  - rebuilds sparse matrices with SciPy
+  - runs Brightway `LCA` using datapackage vectors
+  - computes vector deltas/residuals and writes JSON/MD report
+- `scripts/run_bw25_validation.sh`:
+  - manual launcher
+  - auto-loads `.env`
+  - uses `uv` if present, otherwise creates `.venv/bw25-validator`
+
 ## 4. Schema assumptions
 
 Current runtime primary path expects:
@@ -261,6 +297,8 @@ Input source-of-truth upstream remains:
 - Current uploader supports static key/secret (+ optional session token) credentials; key rotation and STS refresh are not yet automated.
 - No advanced contribution/post-processing yet.
 - Backend is UMFPACK-only; CHOLMOD/SPQR not exposed yet.
+- Brightway validator is manual-only by design and currently validates `solve_one` (not `solve_batch` aggregate logic).
+- Brightway validation assumes snapshot/result artifact schema `v1` (`snapshot-hdf5:v1`, `hdf5:v1`).
 
 ## 6. TODO backlog (priority)
 
@@ -276,6 +314,7 @@ Input source-of-truth upstream remains:
 - Add artifact reader/decoder utilities for both:
   - result format `hdf5:v1`
   - snapshot format `snapshot-hdf5:v1`
+- Add CI smoke for `tools/bw25-validator` (fixture snapshot + fixture solve result, threshold assertions).
 - Strengthen job/result diagnostics schema:
   - factorization stats
   - timing breakdown
@@ -287,6 +326,7 @@ Input source-of-truth upstream remains:
 - Add cache TTL/eviction and memory pressure controls.
 - Add structured metrics and queue lag observability.
 - Add signed S3 upload path (or managed storage SDK) for private bucket setups.
+- Extend Brightway validator coverage to `solve_batch` and multi-impact (`impact_count > 1`) paths.
 
 ### P2
 
@@ -336,6 +376,12 @@ Run end-to-end debug (`prepare` + `solve_one`):
 
 ```bash
 ./scripts/run_full_compute_debug.sh --snapshot-id <snapshot_id>
+```
+
+Run manual Brightway25 validation (default pipeline does not trigger this automatically):
+
+```bash
+./scripts/run_bw25_validation.sh --snapshot-id <snapshot_id>
 ```
 
 ## 9. Definition of done

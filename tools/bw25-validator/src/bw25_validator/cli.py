@@ -1,0 +1,704 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import tempfile
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+import boto3
+import bw2calc as bc
+import bw_processing as bwp
+import h5py
+import numpy as np
+import psycopg
+import requests
+from psycopg.rows import dict_row
+from scipy import sparse
+
+SNAPSHOT_FORMAT = "snapshot-hdf5:v1"
+RESULT_FORMAT = "hdf5:v1"
+
+
+@dataclass
+class TargetResult:
+    result_id: str
+    job_id: str
+    snapshot_id: str
+    job_type: str
+    result_payload: dict[str, Any] | None
+    result_artifact_url: str | None
+    result_artifact_format: str | None
+    job_payload: dict[str, Any]
+    created_at_utc: str
+
+
+@dataclass
+class S3Config:
+    endpoint: str | None
+    region: str | None
+    bucket: str | None
+    access_key_id: str | None
+    secret_access_key: str | None
+    session_token: str | None
+
+    def is_configured(self) -> bool:
+        return all(
+            [
+                self.endpoint,
+                self.region,
+                self.access_key_id,
+                self.secret_access_key,
+            ]
+        )
+
+
+@dataclass
+class VectorMetrics:
+    size: int
+    abs_inf: float
+    rel_inf: float
+    abs_l2: float
+    pass_threshold: bool
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="bw25-validate",
+        description="Manual Brightway25 cross-validation for solve_one artifacts",
+    )
+    parser.add_argument("--database-url", default=os.getenv("DATABASE_URL") or os.getenv("CONN"))
+    parser.add_argument("--result-id", default=None)
+    parser.add_argument("--job-id", default=None)
+    parser.add_argument("--snapshot-id", default=None)
+    parser.add_argument(
+        "--report-dir",
+        default="reports/bw25-validation",
+        help="Output directory for JSON/Markdown reports",
+    )
+    parser.add_argument("--atol", type=float, default=1e-9)
+    parser.add_argument("--rtol", type=float, default=1e-6)
+    parser.add_argument("--fail-on-threshold", action="store_true")
+
+    parser.add_argument("--s3-endpoint", default=os.getenv("S3_ENDPOINT"))
+    parser.add_argument("--s3-region", default=os.getenv("S3_REGION"))
+    parser.add_argument("--s3-bucket", default=os.getenv("S3_BUCKET"))
+    parser.add_argument("--s3-access-key-id", default=os.getenv("S3_ACCESS_KEY_ID"))
+    parser.add_argument("--s3-secret-access-key", default=os.getenv("S3_SECRET_ACCESS_KEY"))
+    parser.add_argument("--s3-session-token", default=os.getenv("S3_SESSION_TOKEN"))
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if not args.database_url:
+        raise SystemExit("missing DB connection: provide --database-url or DATABASE_URL/CONN")
+    if sum(1 for v in [args.result_id, args.job_id] if v) > 1:
+        raise SystemExit("use only one of --result-id or --job-id")
+
+    s3 = S3Config(
+        endpoint=args.s3_endpoint,
+        region=args.s3_region,
+        bucket=args.s3_bucket,
+        access_key_id=args.s3_access_key_id,
+        secret_access_key=args.s3_secret_access_key,
+        session_token=args.s3_session_token,
+    )
+
+    total_started = time.perf_counter()
+    with psycopg.connect(args.database_url, row_factory=dict_row) as conn:
+        resolve_started = time.perf_counter()
+        target = resolve_target_result(conn, args.result_id, args.job_id, args.snapshot_id)
+        resolve_sec = time.perf_counter() - resolve_started
+
+        load_started = time.perf_counter()
+        result_payload = load_result_payload(target, s3)
+        snapshot_payload = load_snapshot_payload(conn, target.snapshot_id, s3)
+        rhs = extract_rhs(target.job_payload)
+        load_sec = time.perf_counter() - load_started
+
+    build_started = time.perf_counter()
+    n = int(snapshot_payload["process_count"])
+    flow_count = int(snapshot_payload["flow_count"])
+    impact_count = int(snapshot_payload["impact_count"])
+    m, b, c = build_matrices(snapshot_payload)
+    build_sec = time.perf_counter() - build_started
+
+    if rhs.shape[0] != n:
+        raise SystemExit(f"rhs length mismatch: rhs={rhs.shape[0]} process_count={n}")
+
+    solve_started = time.perf_counter()
+    x_bw, bw_score = run_brightway_lca(m, b, c, rhs)
+    g_bw = (b @ x_bw).astype(np.float64)
+    h_bw = (c @ g_bw).astype(np.float64)
+    solve_sec = time.perf_counter() - solve_started
+
+    compare_started = time.perf_counter()
+    rust_x = as_float_vector(result_payload.get("x"))
+    rust_g = as_float_vector(result_payload.get("g"))
+    rust_h = as_float_vector(result_payload.get("h"))
+    x_metrics = compare_vector("x", rust_x, x_bw, args.atol, args.rtol)
+    g_metrics = compare_vector("g", rust_g, g_bw, args.atol, args.rtol)
+    h_metrics = compare_vector("h", rust_h, h_bw, args.atol, args.rtol)
+
+    bw_residual_rel = normalized_residual(m, x_bw, rhs)
+    rust_residual_rel = normalized_residual(m, rust_x, rhs) if rust_x is not None else None
+    lcia_check = None
+    if bw_score is not None and rust_h is not None and rust_h.size > 0:
+        abs_delta = float(abs(rust_h[0] - bw_score))
+        rel_delta = float(abs_delta / max(abs(rust_h[0]), 1.0))
+        lcia_check = {
+            "bw_score": float(bw_score),
+            "rust_h0": float(rust_h[0]),
+            "abs_delta": abs_delta,
+            "rel_delta": rel_delta,
+            "pass_threshold": bool(abs_delta <= args.atol or rel_delta <= args.rtol),
+            "considered_for_verdict": False,
+        }
+
+    passes = [
+        metric["pass_threshold"]
+        for metric in [x_metrics, g_metrics, h_metrics]
+        if metric is not None
+    ]
+    verdict = "pass" if all(passes) else "fail"
+    compare_sec = time.perf_counter() - compare_started
+
+    total_sec = time.perf_counter() - total_started
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report = {
+        "run_utc": now_utc,
+        "verdict": verdict,
+        "target": {
+            "result_id": target.result_id,
+            "job_id": target.job_id,
+            "snapshot_id": target.snapshot_id,
+            "job_type": target.job_type,
+            "result_created_at_utc": target.created_at_utc,
+        },
+        "thresholds": {"atol": args.atol, "rtol": args.rtol},
+        "matrix": {
+            "process_count": n,
+            "flow_count": flow_count,
+            "impact_count": impact_count,
+            "m_nnz": int(m.nnz),
+            "b_nnz": int(b.nnz),
+            "c_nnz": int(c.nnz),
+        },
+        "residual": {
+            "bw_rel_inf": bw_residual_rel,
+            "rust_rel_inf": rust_residual_rel,
+        },
+        "comparison": {
+            "x": x_metrics,
+            "g": g_metrics,
+            "h": h_metrics,
+            "lcia_score": lcia_check,
+        },
+        "timing_sec": {
+            "total": total_sec,
+            "resolve_target": resolve_sec,
+            "load_artifacts": load_sec,
+            "build_matrices": build_sec,
+            "brightway_solve": solve_sec,
+            "compare": compare_sec,
+        },
+    }
+
+    report_dir = Path(args.report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{target.result_id}"
+    json_path = report_dir / f"{stem}.json"
+    md_path = report_dir / f"{stem}.md"
+    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    md_path.write_text(render_markdown_report(report), encoding="utf-8")
+
+    print(f"[done] bw25 validation completed: verdict={verdict}")
+    print(f"[report] json={json_path}")
+    print(f"[report] md={md_path}")
+    print(f"[timing] total_sec={total_sec:.6f}")
+
+    if args.fail_on_threshold and verdict != "pass":
+        raise SystemExit(3)
+
+
+def resolve_target_result(
+    conn: psycopg.Connection[Any],
+    result_id: str | None,
+    job_id: str | None,
+    snapshot_id: str | None,
+) -> TargetResult:
+    if result_id:
+        query = """
+            SELECT
+                r.id::text AS result_id,
+                r.job_id::text AS job_id,
+                r.snapshot_id::text AS snapshot_id,
+                j.job_type AS job_type,
+                r.payload AS result_payload,
+                r.artifact_url AS result_artifact_url,
+                r.artifact_format AS result_artifact_format,
+                j.payload AS job_payload,
+                to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at_utc
+            FROM public.lca_results r
+            JOIN public.lca_jobs j ON j.id = r.job_id
+            WHERE r.id = %s::uuid
+            LIMIT 1
+        """
+        row = conn.execute(query, (result_id,)).fetchone()
+    elif job_id:
+        query = """
+            SELECT
+                r.id::text AS result_id,
+                r.job_id::text AS job_id,
+                r.snapshot_id::text AS snapshot_id,
+                j.job_type AS job_type,
+                r.payload AS result_payload,
+                r.artifact_url AS result_artifact_url,
+                r.artifact_format AS result_artifact_format,
+                j.payload AS job_payload,
+                to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at_utc
+            FROM public.lca_results r
+            JOIN public.lca_jobs j ON j.id = r.job_id
+            WHERE r.job_id = %s::uuid
+            ORDER BY r.created_at DESC
+            LIMIT 1
+        """
+        row = conn.execute(query, (job_id,)).fetchone()
+    else:
+        params: tuple[Any, ...]
+        if snapshot_id:
+            query = """
+                SELECT
+                    r.id::text AS result_id,
+                    r.job_id::text AS job_id,
+                    r.snapshot_id::text AS snapshot_id,
+                    j.job_type AS job_type,
+                    r.payload AS result_payload,
+                    r.artifact_url AS result_artifact_url,
+                    r.artifact_format AS result_artifact_format,
+                    j.payload AS job_payload,
+                    to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at_utc
+                FROM public.lca_results r
+                JOIN public.lca_jobs j ON j.id = r.job_id
+                WHERE r.snapshot_id = %s::uuid
+                  AND j.job_type = 'solve_one'
+                ORDER BY r.created_at DESC
+                LIMIT 1
+            """
+            params = (snapshot_id,)
+        else:
+            query = """
+                SELECT
+                    r.id::text AS result_id,
+                    r.job_id::text AS job_id,
+                    r.snapshot_id::text AS snapshot_id,
+                    j.job_type AS job_type,
+                    r.payload AS result_payload,
+                    r.artifact_url AS result_artifact_url,
+                    r.artifact_format AS result_artifact_format,
+                    j.payload AS job_payload,
+                    to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at_utc
+                FROM public.lca_results r
+                JOIN public.lca_jobs j ON j.id = r.job_id
+                WHERE j.job_type = 'solve_one'
+                ORDER BY r.created_at DESC
+                LIMIT 1
+            """
+            params = ()
+        row = conn.execute(query, params).fetchone()
+
+    if not row:
+        raise SystemExit("no result row found for selected target")
+    if row["job_type"] != "solve_one":
+        raise SystemExit(
+            f"only solve_one validation is supported currently, got job_type={row['job_type']}"
+        )
+
+    return TargetResult(
+        result_id=row["result_id"],
+        job_id=row["job_id"],
+        snapshot_id=row["snapshot_id"],
+        job_type=row["job_type"],
+        result_payload=as_json_dict(row["result_payload"]),
+        result_artifact_url=row["result_artifact_url"],
+        result_artifact_format=row["result_artifact_format"],
+        job_payload=as_json_dict(row["job_payload"]) or {},
+        created_at_utc=row["created_at_utc"] or "",
+    )
+
+
+def load_result_payload(target: TargetResult, s3: S3Config) -> dict[str, Any]:
+    if target.result_payload is not None:
+        return extract_result_payload_object(target.result_payload)
+
+    if not target.result_artifact_url:
+        raise SystemExit("result row has no inline payload and no artifact_url")
+    if target.result_artifact_format and target.result_artifact_format != RESULT_FORMAT:
+        raise SystemExit(
+            "unsupported result artifact format: "
+            f"{target.result_artifact_format} (expected {RESULT_FORMAT})"
+        )
+
+    bytes_data = download_object_url(target.result_artifact_url, s3)
+    envelope = decode_hdf5_envelope(bytes_data)
+    if envelope["format"] != RESULT_FORMAT:
+        raise SystemExit(
+            f"unexpected result artifact format: {envelope['format']} (expected {RESULT_FORMAT})"
+        )
+    payload = envelope["envelope"].get("payload")
+    if not isinstance(payload, dict):
+        raise SystemExit("invalid result artifact payload")
+    return extract_result_payload_object(payload)
+
+
+def extract_result_payload_object(payload: dict[str, Any]) -> dict[str, Any]:
+    if "items" in payload:
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            raise SystemExit("solve_batch payload has empty items")
+        first = items[0]
+        if not isinstance(first, dict):
+            raise SystemExit("invalid solve_batch item in payload")
+        return first
+    return payload
+
+
+def load_snapshot_payload(
+    conn: psycopg.Connection[Any],
+    snapshot_id: str,
+    s3: S3Config,
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT artifact_url, artifact_format
+        FROM public.lca_snapshot_artifacts
+        WHERE snapshot_id = %s::uuid
+          AND status = 'ready'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (snapshot_id,),
+    ).fetchone()
+
+    if not row:
+        raise SystemExit(f"no ready snapshot artifact for snapshot_id={snapshot_id}")
+    artifact_url = row["artifact_url"]
+    artifact_format = row["artifact_format"]
+    if artifact_format != SNAPSHOT_FORMAT:
+        raise SystemExit(
+            f"unsupported snapshot artifact format: {artifact_format} (expected {SNAPSHOT_FORMAT})"
+        )
+    bytes_data = download_object_url(artifact_url, s3)
+    envelope = decode_hdf5_envelope(bytes_data)
+    if envelope["format"] != SNAPSHOT_FORMAT:
+        raise SystemExit(
+            f"unexpected snapshot envelope format: {envelope['format']} (expected {SNAPSHOT_FORMAT})"
+        )
+    payload = envelope["envelope"].get("payload")
+    if not isinstance(payload, dict):
+        raise SystemExit("invalid snapshot envelope payload")
+    return payload
+
+
+def extract_rhs(job_payload: dict[str, Any]) -> np.ndarray:
+    rhs = job_payload.get("rhs")
+    if not isinstance(rhs, list):
+        raise SystemExit("job payload has no solve_one rhs array")
+    vector = as_float_vector(rhs)
+    if vector is None:
+        return np.array([], dtype=np.float64)
+    return vector
+
+
+def build_matrices(
+    snapshot_payload: dict[str, Any],
+) -> tuple[sparse.csc_matrix, sparse.csc_matrix, sparse.csc_matrix]:
+    process_count = int(snapshot_payload["process_count"])
+    flow_count = int(snapshot_payload["flow_count"])
+    impact_count = int(snapshot_payload["impact_count"])
+
+    a = triplets_to_sparse(
+        snapshot_payload.get("technosphere_entries", []),
+        process_count,
+        process_count,
+    )
+    b = triplets_to_sparse(
+        snapshot_payload.get("biosphere_entries", []), flow_count, process_count
+    )
+    c = triplets_to_sparse(
+        snapshot_payload.get("characterization_factors", []),
+        impact_count,
+        flow_count,
+    )
+
+    m = sparse.eye(process_count, format="csc", dtype=np.float64) - a
+    return m, b, c
+
+
+def triplets_to_sparse(
+    entries: Any,
+    nrows: int,
+    ncols: int,
+) -> sparse.csc_matrix:
+    if not isinstance(entries, list) or not entries:
+        return sparse.csc_matrix((nrows, ncols), dtype=np.float64)
+
+    rows: list[int] = []
+    cols: list[int] = []
+    vals: list[float] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        row = int(item.get("row", 0))
+        col = int(item.get("col", 0))
+        value = float(item.get("value", 0.0))
+        rows.append(row)
+        cols.append(col)
+        vals.append(value)
+
+    coo = sparse.coo_matrix((np.array(vals), (np.array(rows), np.array(cols))), shape=(nrows, ncols))
+    return coo.tocsc()
+
+
+def run_brightway_lca(
+    m: sparse.csc_matrix,
+    b: sparse.csc_matrix,
+    c: sparse.csc_matrix,
+    rhs: np.ndarray,
+) -> tuple[np.ndarray, float | None]:
+    dp = bwp.create_datapackage()
+    add_sparse_matrix_to_datapackage(dp, "technosphere_matrix", m)
+    add_sparse_matrix_to_datapackage(dp, "biosphere_matrix", b)
+    if c.nnz > 0:
+        add_sparse_matrix_to_datapackage(dp, "characterization_matrix", c)
+
+    demand = {int(idx): float(value) for idx, value in enumerate(rhs.tolist()) if abs(value) > 0.0}
+    if not demand:
+        demand = {0: 0.0}
+
+    lca = bc.LCA(demand=demand, data_objs=[dp], use_arrays=False, use_distributions=False)
+    lca.lci()
+    x_bw = np.array(lca.supply_array, dtype=np.float64).reshape(-1)
+
+    bw_score = None
+    if c.nnz > 0:
+        lca.lcia()
+        bw_score = float(lca.score)
+
+    return x_bw, bw_score
+
+
+def add_sparse_matrix_to_datapackage(
+    dp: bwp.Datapackage,
+    matrix_name: str,
+    mat: sparse.csc_matrix,
+) -> None:
+    coo = mat.tocoo()
+    indices = np.zeros(coo.nnz, dtype=bwp.INDICES_DTYPE)
+    if coo.nnz > 0:
+        indices["row"] = coo.row.astype(np.int64)
+        indices["col"] = coo.col.astype(np.int64)
+    data = coo.data.astype(np.float64, copy=False)
+    dp.add_persistent_vector(
+        matrix=matrix_name,
+        indices_array=indices,
+        data_array=data,
+        name=f"{matrix_name}-vector",
+    )
+
+
+def compare_vector(
+    name: str,
+    rust_vec: np.ndarray | None,
+    bw_vec: np.ndarray,
+    atol: float,
+    rtol: float,
+) -> dict[str, Any] | None:
+    if rust_vec is None:
+        return None
+    if rust_vec.shape != bw_vec.shape:
+        raise SystemExit(f"shape mismatch for {name}: rust={rust_vec.shape} bw={bw_vec.shape}")
+    diff = rust_vec - bw_vec
+    abs_inf = float(np.linalg.norm(diff, ord=np.inf))
+    ref_scale = max(float(np.linalg.norm(rust_vec, ord=np.inf)), 1.0)
+    rel_inf = float(abs_inf / ref_scale)
+    abs_l2 = float(np.linalg.norm(diff))
+    passed = bool(abs_inf <= atol or rel_inf <= rtol)
+    return {
+        "size": int(rust_vec.size),
+        "abs_inf": abs_inf,
+        "rel_inf": rel_inf,
+        "abs_l2": abs_l2,
+        "pass_threshold": passed,
+    }
+
+
+def normalized_residual(
+    m: sparse.csc_matrix,
+    x: np.ndarray | None,
+    rhs: np.ndarray,
+) -> float | None:
+    if x is None:
+        return None
+    residual = (m @ x) - rhs
+    num = float(np.linalg.norm(residual, ord=np.inf))
+    m_norm_inf = float(sparse.linalg.norm(m, ord=np.inf))
+    denom = float(m_norm_inf * np.linalg.norm(x, ord=np.inf) + np.linalg.norm(rhs, ord=np.inf))
+    if denom <= 0:
+        return num
+    return num / denom
+
+
+def as_json_dict(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def as_float_vector(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise SystemExit("expected vector list in payload")
+    return np.array([float(v) for v in value], dtype=np.float64)
+
+
+def download_object_url(url: str, s3: S3Config) -> bytes:
+    if s3.is_configured():
+        parsed = urlparse(url)
+        path_parts = [part for part in parsed.path.split("/") if part]
+        parsed_bucket: str | None = None
+        parsed_key: str | None = None
+
+        # Supabase S3 path-style URL:
+        # /storage/v1/s3/<bucket>/<key...>
+        if len(path_parts) >= 5 and path_parts[:3] == ["storage", "v1", "s3"]:
+            parsed_bucket = path_parts[3]
+            parsed_key = "/".join(path_parts[4:])
+        elif len(path_parts) >= 2:
+            parsed_bucket = path_parts[0]
+            parsed_key = "/".join(path_parts[1:])
+
+        if not parsed_bucket or not parsed_key:
+            raise SystemExit(f"cannot parse bucket/key from object URL path: {url}")
+
+        bucket = s3.bucket or parsed_bucket
+        key = parsed_key
+        client = boto3.client(
+            "s3",
+            endpoint_url=s3.endpoint,
+            region_name=s3.region,
+            aws_access_key_id=s3.access_key_id,
+            aws_secret_access_key=s3.secret_access_key,
+            aws_session_token=s3.session_token,
+        )
+        response = client.get_object(Bucket=bucket, Key=key)
+        body = response["Body"].read()
+        return bytes(body)
+
+    response = requests.get(url, timeout=120)
+    response.raise_for_status()
+    return response.content
+
+
+def decode_hdf5_envelope(raw: bytes) -> dict[str, Any]:
+    with tempfile.NamedTemporaryFile(prefix="bw25-", suffix=".h5") as tmp:
+        tmp.write(raw)
+        tmp.flush()
+        with h5py.File(tmp.name, "r") as file:
+            fmt_bytes = np.array(file["format"][:], dtype=np.uint8).tobytes()
+            envelope_bytes = np.array(file["envelope_json"][:], dtype=np.uint8).tobytes()
+    return {
+        "format": fmt_bytes.decode("utf-8"),
+        "envelope": json.loads(envelope_bytes.decode("utf-8")),
+    }
+
+
+def render_markdown_report(report: dict[str, Any]) -> str:
+    target = report["target"]
+    threshold = report["thresholds"]
+    matrix = report["matrix"]
+    timing = report["timing_sec"]
+    residual = report["residual"]
+    compare = report["comparison"]
+
+    def metric_line(name: str, metric: dict[str, Any] | None) -> str:
+        if metric is None:
+            return f"- {name}: `n/a`"
+        return (
+            f"- {name}: pass=`{metric['pass_threshold']}` "
+            f"abs_inf=`{metric['abs_inf']:.6e}` rel_inf=`{metric['rel_inf']:.6e}` abs_l2=`{metric['abs_l2']:.6e}`"
+        )
+
+    lcia = compare.get("lcia_score")
+    lcia_line = "- lcia_score: `n/a`"
+    if lcia is not None:
+        lcia_line = (
+            f"- lcia_score: pass=`{lcia['pass_threshold']}` considered_for_verdict=`{lcia['considered_for_verdict']}` "
+            f"abs_delta=`{lcia['abs_delta']:.6e}` rel_delta=`{lcia['rel_delta']:.6e}` "
+            f"bw_score=`{lcia['bw_score']:.6e}` rust_h0=`{lcia['rust_h0']:.6e}`"
+        )
+
+    return "\n".join(
+        [
+            "# Brightway25 Validation Report",
+            "",
+            f"- run_utc: `{report['run_utc']}`",
+            f"- verdict: `{report['verdict']}`",
+            f"- result_id: `{target['result_id']}`",
+            f"- job_id: `{target['job_id']}`",
+            f"- snapshot_id: `{target['snapshot_id']}`",
+            "",
+            "## Thresholds",
+            "",
+            f"- atol: `{threshold['atol']}`",
+            f"- rtol: `{threshold['rtol']}`",
+            "",
+            "## Matrix",
+            "",
+            f"- process_count: `{matrix['process_count']}`",
+            f"- flow_count: `{matrix['flow_count']}`",
+            f"- impact_count: `{matrix['impact_count']}`",
+            f"- m_nnz: `{matrix['m_nnz']}`",
+            f"- b_nnz: `{matrix['b_nnz']}`",
+            f"- c_nnz: `{matrix['c_nnz']}`",
+            "",
+            "## Comparison",
+            "",
+            metric_line("x", compare.get("x")),
+            metric_line("g", compare.get("g")),
+            metric_line("h", compare.get("h")),
+            lcia_line,
+            "",
+            "## Residual",
+            "",
+            f"- bw_rel_inf: `{residual['bw_rel_inf']}`",
+            f"- rust_rel_inf: `{residual['rust_rel_inf']}`",
+            "",
+            "## Timing (sec)",
+            "",
+            f"- total: `{timing['total']}`",
+            f"- resolve_target: `{timing['resolve_target']}`",
+            f"- load_artifacts: `{timing['load_artifacts']}`",
+            f"- build_matrices: `{timing['build_matrices']}`",
+            f"- brightway_solve: `{timing['brightway_solve']}`",
+            f"- compare: `{timing['compare']}`",
+            "",
+        ]
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bw25-validator"
+version = "0.1.0"
+description = "Manual Brightway25 cross-validator for Tiangong LCA snapshot/solve artifacts"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "brightway25==1.1.1",
+  "pypardiso>=0.4.6; platform_system == 'Linux' and platform_machine == 'x86_64'",
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "h5py>=3.11",
+  "psycopg[binary]>=3.2",
+  "boto3>=1.35",
+  "requests>=2.32",
+]
+
+[project.scripts]
+bw25-validate = "bw25_validator.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -190,6 +190,45 @@ make check
 - 若不传 `--snapshot-id`，会自动选最新 snapshot。
 - 脚本会优先读取 `lca_snapshot_artifacts` 的矩阵规模；若不存在则回退读取旧 `lca_*_entries`。
 
+### 6.1 Brightway25 手动校验（默认不触发）
+
+已引入独立校验工具：`tools/bw25-validator`（`brightway25==1.1.1`）。
+
+设计约束：
+
+- 不参与 worker 主链路
+- 不自动随 `prepare/solve` 执行
+- 仅手动触发，用于数值交叉验证
+
+手动运行：
+
+```bash
+./scripts/run_bw25_validation.sh --snapshot-id <snapshot_id>
+```
+
+可选指定目标：
+
+```bash
+./scripts/run_bw25_validation.sh --result-id <result_uuid>
+./scripts/run_bw25_validation.sh --job-id <job_uuid>
+```
+
+输出：
+
+- `reports/bw25-validation/<result_id>.json`
+- `reports/bw25-validation/<result_id>.md`
+
+校验内容：
+
+- Brightway 重建 `M` 并求 `x`
+- 对比 Rust 的 `x/g/h`
+- 记录残差与阈值判断（`atol/rtol`）
+
+性能说明（x64 Linux）：
+
+- 校验工具默认安装 `pypardiso`（`pypardiso>=0.4.6`）
+- 用于消除 Brightway 在 AMD/Intel x64 上的“未安装 pypardiso”警告并提升线性求解速度
+
 启动服务：
 
 ```bash

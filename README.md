@@ -69,6 +69,41 @@ set -a && source .env && set +a
 psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260304073000_lca_snapshot_phase1.sql
 ```
 
+### 4.1 构建可计算 snapshot（从 `processes/flows/lciamethods` 生成 `lca_*`）
+
+快速生成一个可计算 snapshot：
+
+```bash
+./scripts/build_snapshot_from_ilcd.sh
+```
+
+默认就是“全库正式版”：
+
+- 只取 `state_code=100`（`--process-states` 默认 `100`）
+- 不限 process 数量（`--process-limit` 默认 `0`，即 no limit）
+- 生成 coverage 报表到 `reports/snapshot-coverage/<snapshot_id>.{json,md}`
+- 报表包含三组指标：匹配率、奇异风险、矩阵规模
+
+常用参数：
+
+- `--process-limit 100`：先做小样本调试 snapshot（正式跑不要加）
+- `--no-lcia`：先不构建 C 矩阵（只跑到 LCI）
+- `--method-id <uuid> --method-version <ver>`：指定 LCIA 方法
+- `--self-loop-cutoff 0.999999`：过滤会导致 `M = I - A` 奇异的对角自环（`|A_ii|` 过大）
+- `--report-dir <path>`：指定 coverage 报表输出目录
+
+脚本只写入 `lca_*` 新表，不修改原始 `processes/flows/lciamethods` 数据。
+
+建议调试流程：
+
+```bash
+# 1) 先构建一个小样本可计算 snapshot
+./scripts/build_snapshot_from_ilcd.sh --process-limit 100
+
+# 2) 用返回的 snapshot_id 跑 prepare + solve + 结果写回，并记录日志
+./scripts/run_full_compute_debug.sh --snapshot-id <snapshot_id>
+```
+
 ## 5. 环境变量
 
 最小必需：

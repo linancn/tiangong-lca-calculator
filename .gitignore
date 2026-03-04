@@ -21,6 +21,7 @@ Thumbs.db
 
 # Logs and local runtime output
 *.log
+/reports/
 
 # Coverage/profiling artifacts
 coverage/

@@ -133,6 +133,21 @@ Latest checks passed:
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
 
+### 2.5 Snapshot builder status (implemented script mode)
+
+- `scripts/build_snapshot_from_ilcd.sh` now supports full-library build by default:
+  - default `--process-states 100` (only `state_code=100`)
+  - default `--process-limit 0` (no limit)
+- Coverage report is generated per snapshot:
+  - `reports/snapshot-coverage/<snapshot_id>.json`
+  - `reports/snapshot-coverage/<snapshot_id>.md`
+- Coverage report metrics include:
+  - matching coverage (`input_edges_total`, unique/multi/unmatched, unique/any match pct)
+  - singular risk (`prefilter_diag_abs_ge_cutoff`, `postfilter_a_diag_abs_ge_cutoff`, `m_zero_diagonal_count`, `m_min_abs_diagonal`, derived risk level)
+  - matrix scale (`process_count`, `flow_count`, `impact_count`, `a_nnz`, `b_nnz`, `c_nnz`, `m_nnz_estimated`, `m_sparsity_estimated`)
+- The script computes/report metrics in the same SQL build transaction and parses a `COVERAGE_METRICS|...` line, avoiding a second heavy full-table re-scan.
+- Full-library default run (`process_limit=0`, `state_code=100`) has been verified successfully on current DB (`process_count=2025`) and feeds `run_full_compute_debug.sh` end-to-end (`prepare -> solve -> S3 HDF5 result`).
+
 ## 3. Architecture map
 
 ### 3.1 `crates/suitesparse-ffi`
@@ -197,7 +212,8 @@ Input source-of-truth upstream remains:
 
 ## 5. Known limitations / risks
 
-- No snapshot-builder pipeline yet (no automated backfill from source tables to `lca_*` entries).
+- Snapshot builder currently lives as SQL script (`scripts/build_snapshot_from_ilcd.sh`), not yet as first-class worker job type.
+- Provider matching in snapshot builder is flow-based (`strict_unique_provider`), because source exchange JSON usually lacks stable provider-process references; this can reduce technosphere edge coverage.
 - Factorization cache is process-local memory only.
 - No persisted factorization snapshots across restart.
 - Internal HTTP endpoints do not enforce auth (assumed trusted internal network).
@@ -212,9 +228,10 @@ Input source-of-truth upstream remains:
 - Implement snapshot builder job:
   - read `processes/flows/lciamethods`
   - materialize `lca_process_index/lca_flow_index/lca_*_entries`
-  - write coverage diagnostics
+- `scripts/build_snapshot_from_ilcd.sh` now exists for SQL-based snapshot build from current ILCD-like JSON structure, with full-library default (`state_code=100`, no process limit) and coverage report output.
+- Script includes `--self-loop-cutoff` to drop singular diagonal self-loop edges in technosphere (`|A_ii| >= cutoff`) and `--singular-eps` for near-singular diagonal checks.
 - The repo now includes `scripts/run_full_compute_debug.sh` for end-to-end queue run with detailed logs.
-- Current blocker for true full-library run remains snapshot backfill (script fails fast if `lca_*` snapshot data is empty).
+- End-to-end queue run has been verified on generated snapshot (`prepare -> solve -> lca_results`) with HDF5 artifact upload to S3.
 - Add integration tests with real Postgres + `pgmq` (containerized).
 - Add artifact reader/decoder utility for `hdf5:v1` outputs.
 - Strengthen job/result diagnostics schema:

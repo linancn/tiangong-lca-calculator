@@ -155,8 +155,7 @@ if [ "${PROCESS_COUNT:-0}" -le 0 ]; then
 fi
 
 if [ "${A_NNZ:-0}" -le 0 ]; then
-  echo "snapshot $SNAPSHOT_ID has zero technosphere entries; cannot build M=I-A" >&2
-  exit 1
+  echo "[warn] snapshot $SNAPSHOT_ID has zero technosphere entries; M defaults to identity (I - 0)" >&2
 fi
 
 if [ "$DEMAND_PROCESS_IDX" -ge "$PROCESS_COUNT" ]; then
@@ -180,6 +179,7 @@ echo "  run_log=$RUN_LOG"
 echo "  worker_log=$WORKER_LOG"
 
 WORKER_PID=""
+WORKER_BIN="$ROOT_DIR/target/release/solver-worker"
 cleanup() {
   if [ "$KEEP_WORKER_ALIVE" = "1" ]; then
     return
@@ -193,6 +193,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+if [ ! -x "$WORKER_BIN" ]; then
+  echo "[info] building release binary: $WORKER_BIN"
+  "$CARGO_BIN" build -p solver-worker --release >>"$WORKER_LOG" 2>&1
+fi
+
 echo "[info] starting solver-worker in queue mode"
 (
   export DATABASE_URL="$DB_URL"
@@ -200,7 +205,7 @@ echo "[info] starting solver-worker in queue mode"
   export SOLVER_MODE=worker
   export RUST_LOG="${RUST_LOG:-info,solver_worker=debug,solver_core=debug}"
   export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
-  "$CARGO_BIN" run -p solver-worker --release
+  "$WORKER_BIN"
 ) >>"$WORKER_LOG" 2>&1 &
 WORKER_PID="$!"
 

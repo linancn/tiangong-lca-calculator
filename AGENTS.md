@@ -154,11 +154,22 @@ Latest checks passed:
   - writes coverage report:
     - `reports/snapshot-coverage/<snapshot_id>.json`
     - `reports/snapshot-coverage/<snapshot_id>.md`
+- Snapshot coverage report includes build timing phases:
+  - resolve method identity
+  - source fingerprint
+  - reuse lookup
+  - method factor load
+  - sparse payload build
+  - encode/upload/persist
+  - total
 - Builder now supports same-source skip-rebuild:
   - computes source fingerprint from `processes/flows/lciamethods` as `count(*) + max(modified_at)` plus build config
   - looks up `lca_network_snapshots.source_hash` + ready snapshot artifact
   - on hit, reuses existing snapshot artifact and returns immediately
   - explicit `--snapshot-id` disables auto-reuse and forces build for that ID
+- Builder performance updates:
+  - flow metadata fetch is candidate-id scoped (`WHERE id = ANY(...)`, latest row per id)
+  - process exchange parsing runs in parallel (rayon) across process shards
 - Coverage report metrics include:
   - matching coverage (`input_edges_total`, unique/multi/unmatched, unique/any match pct)
   - singular risk (`prefilter_diag_abs_ge_cutoff`, `postfilter_a_diag_abs_ge_cutoff`, `m_zero_diagonal_count`, `m_min_abs_diagonal`, derived risk level)
@@ -166,7 +177,8 @@ Latest checks passed:
 - `scripts/run_full_compute_debug.sh` now writes one run report per execution and reads matrix scale from `lca_snapshot_artifacts` first (fallback to legacy tables):
   - default `reports/full-run/run-<ts>.json`
   - default `reports/full-run/run-<ts>.md`
-  - includes total/worker-start/prepare/solve timing, job ids/status, matrix nnz summary, artifact metadata, log paths.
+  - includes total/worker-start/prepare/solve timing, plus merged `build_snapshot` and `build_and_compute_total`, job ids/status, matrix nnz summary, artifact metadata, log paths.
+  - auto-discovers latest snapshot coverage report by `snapshot_id` and attaches build source metadata (`reused_snapshot`, `build_report_json`) into full-run report.
 
 ## 3. Architecture map
 

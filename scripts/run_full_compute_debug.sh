@@ -20,6 +20,9 @@ POLL_SEC="${POLL_SEC:-2}"
 DEMAND_PROCESS_IDX="${DEMAND_PROCESS_IDX:-0}"
 PRINT_LEVEL="${PRINT_LEVEL:-0.0}"
 KEEP_WORKER_ALIVE="${KEEP_WORKER_ALIVE:-0}"
+BUILD_REPORT_JSON=""
+BUILD_TOTAL_SEC=""
+BUILD_REUSED_SNAPSHOT=""
 
 usage() {
   cat <<'USAGE'
@@ -140,6 +143,40 @@ sql_exec() {
   psql "$DB_URL" -v ON_ERROR_STOP=1 -c "$1"
 }
 
+is_decimal_number() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+find_latest_snapshot_build_report() {
+  find "$ROOT_DIR/reports" -type f -name "${SNAPSHOT_ID}.json" -printf '%T@|%p\n' 2>/dev/null \
+    | sort -t'|' -k1,1nr \
+    | head -n1 \
+    | cut -d'|' -f2-
+}
+
+load_build_timing_from_report() {
+  local report="$1"
+  if [ ! -f "$report" ]; then
+    return
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    BUILD_TOTAL_SEC="$(jq -r '.build_timing_sec.total_sec // empty' "$report" 2>/dev/null || true)"
+    BUILD_REUSED_SNAPSHOT="$(jq -r '.build_timing_sec.reused_snapshot // empty' "$report" 2>/dev/null || true)"
+  else
+    BUILD_TOTAL_SEC="$(sed -n 's/.*"total_sec":[[:space:]]*\\([0-9.][0-9.]*\\).*/\\1/p' "$report" | head -n1)"
+    BUILD_REUSED_SNAPSHOT="$(sed -n 's/.*"reused_snapshot":[[:space:]]*\\(true\\|false\\).*/\\1/p' "$report" | head -n1)"
+  fi
+
+  if ! is_decimal_number "${BUILD_TOTAL_SEC:-}"; then
+    BUILD_TOTAL_SEC=""
+  fi
+  if [ "${BUILD_REUSED_SNAPSHOT:-}" != "true" ] && [ "${BUILD_REUSED_SNAPSHOT:-}" != "false" ]; then
+    BUILD_REUSED_SNAPSHOT=""
+  fi
+}
+
 gen_uuid() {
   cat /proc/sys/kernel/random/uuid
 }
@@ -155,6 +192,11 @@ fi
 if [ -z "$SNAPSHOT_ID" ]; then
   echo "no snapshot found; run scripts/build_snapshot_from_ilcd.sh first" >&2
   exit 1
+fi
+
+BUILD_REPORT_JSON="$(find_latest_snapshot_build_report || true)"
+if [ -n "$BUILD_REPORT_JSON" ]; then
+  load_build_timing_from_report "$BUILD_REPORT_JSON"
 fi
 
 MATRIX_SOURCE=""
@@ -235,6 +277,15 @@ echo "[info] snapshot_id: $SNAPSHOT_ID"
 echo "[info] queue_name: $QUEUE_NAME"
 echo "[info] matrix_source=$MATRIX_SOURCE"
 echo "[info] process_count=$PROCESS_COUNT flow_count=$FLOW_COUNT a_nnz=$A_NNZ b_nnz=$B_NNZ c_nnz=$C_NNZ"
+if is_decimal_number "${BUILD_TOTAL_SEC:-}"; then
+  echo "[info] build_snapshot_sec=$BUILD_TOTAL_SEC"
+  if [ -n "$BUILD_REUSED_SNAPSHOT" ]; then
+    echo "[info] build_reused_snapshot=$BUILD_REUSED_SNAPSHOT"
+  fi
+  echo "[info] build_report_json=$BUILD_REPORT_JSON"
+else
+  echo "[warn] build timing not found for snapshot report: $SNAPSHOT_ID"
+fi
 echo "[info] logs:"
 echo "  run_log=$RUN_LOG"
 echo "  worker_log=$WORKER_LOG"
@@ -282,6 +333,8 @@ write_run_report() {
   local exit_code="$1"
   local run_end_epoch run_end_iso run_status total_elapsed
   local worker_start_elapsed prepare_elapsed solve_elapsed
+  local build_snapshot_json build_plus_compute_json build_reused_json
+  local build_snapshot_md build_plus_compute_md build_reused_md
   local prepare_status solve_status
 
   run_end_epoch="$(date +%s)"
@@ -306,6 +359,23 @@ write_run_report() {
     solve_status="$(sql_scalar "SELECT COALESCE(status, 'missing') FROM public.lca_jobs WHERE id = '$SOLVE_JOB_ID'::uuid;" 2>/dev/null || echo unknown)"
   fi
 
+  build_snapshot_json="null"
+  build_plus_compute_json="null"
+  build_reused_json="null"
+  build_snapshot_md="n/a"
+  build_plus_compute_md="n/a"
+  build_reused_md="n/a"
+  if is_decimal_number "${BUILD_TOTAL_SEC:-}"; then
+    build_snapshot_json="$BUILD_TOTAL_SEC"
+    build_plus_compute_json="$(awk -v a="$total_elapsed" -v b="$BUILD_TOTAL_SEC" 'BEGIN{printf "%.6f", a+b}')"
+    build_snapshot_md="$BUILD_TOTAL_SEC"
+    build_plus_compute_md="$build_plus_compute_json"
+  fi
+  if [ "$BUILD_REUSED_SNAPSHOT" = "true" ] || [ "$BUILD_REUSED_SNAPSHOT" = "false" ]; then
+    build_reused_json="$BUILD_REUSED_SNAPSHOT"
+    build_reused_md="$BUILD_REUSED_SNAPSHOT"
+  fi
+
   cat > "$REPORT_JSON" <<JSON
 {
   "run_ts": $(as_json_string "$RUN_TS"),
@@ -327,9 +397,15 @@ write_run_report() {
   },
   "timing_sec": {
     "total": $total_elapsed,
+    "build_snapshot": $build_snapshot_json,
+    "build_and_compute_total": $build_plus_compute_json,
     "worker_startup": $worker_start_elapsed,
     "prepare_job": $prepare_elapsed,
     "solve_job": $solve_elapsed
+  },
+  "build": {
+    "reused_snapshot": $build_reused_json,
+    "report_json": $(if [ -n "$BUILD_REPORT_JSON" ]; then as_json_string "$BUILD_REPORT_JSON"; else printf 'null'; fi)
   },
   "jobs": {
     "prepare_job_id": $(as_json_string "$PREPARE_JOB_ID"),
@@ -363,9 +439,16 @@ JSON
 ## Timing (sec)
 
 - total: \`$total_elapsed\`
+- build_snapshot: \`$build_snapshot_md\`
+- build_and_compute_total: \`$build_plus_compute_md\`
 - worker_startup: \`$worker_start_elapsed\`
 - prepare_job: \`$prepare_elapsed\`
 - solve_job: \`$solve_elapsed\`
+
+## Build Source
+
+- reused_snapshot: \`$build_reused_md\`
+- build_report_json: \`$BUILD_REPORT_JSON\`
 
 ## Matrix
 

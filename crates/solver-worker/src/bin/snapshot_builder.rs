@@ -13,8 +13,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clap::Parser;
+use rayon::prelude::*;
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use solver_core::{ModelSparseData, SparseTriplet};
@@ -69,15 +72,8 @@ struct Cli {
     report_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ProcessKey {
-    id: Uuid,
-    version: String,
-}
-
 #[derive(Debug, Clone)]
 struct ProcessRow {
-    key: ProcessKey,
     json: Value,
 }
 
@@ -109,7 +105,7 @@ struct BuildOutput {
     coverage: SnapshotCoverageReport,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct SourceSnapshotSummary {
     process_count: i64,
     process_max_modified_at_utc: String,
@@ -132,8 +128,23 @@ struct ReuseCandidate {
     c_nnz: i64,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+struct BuildTimingSec {
+    reused_snapshot: bool,
+    total_sec: f64,
+    resolve_method_identity_sec: f64,
+    compute_source_fingerprint_sec: f64,
+    reuse_lookup_sec: f64,
+    load_method_factors_sec: f64,
+    build_sparse_payload_sec: f64,
+    encode_artifact_sec: f64,
+    upload_artifact_sec: f64,
+    persist_metadata_sec: f64,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let total_started = Instant::now();
     let cli = Cli::parse();
     if cli.provider_rule != "strict_unique_provider" {
         return Err(anyhow::anyhow!(
@@ -163,7 +174,10 @@ async fn main() -> anyhow::Result<()> {
     let requested_snapshot_id = cli.snapshot_id;
     let (all_states, state_codes, process_states_label) =
         parse_process_states(&cli.process_states)?;
+    let mut build_timing = BuildTimingSec::default();
+    let method_started = Instant::now();
     let method = resolve_method_identity(&pool, &cli).await?;
+    build_timing.resolve_method_identity_sec = method_started.elapsed().as_secs_f64();
     let build_config = SnapshotBuildConfig {
         process_states: process_states_label.clone(),
         process_limit: i32::try_from(cli.process_limit)
@@ -175,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         method_id: method.method_id,
         method_version: method.method_version.clone(),
     };
+    let fingerprint_started = Instant::now();
     let (source_summary, source_fingerprint) = compute_source_fingerprint(
         &pool,
         all_states,
@@ -183,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
         &build_config,
     )
     .await?;
+    build_timing.compute_source_fingerprint_sec = fingerprint_started.elapsed().as_secs_f64();
 
     if let Some(snapshot_id) = requested_snapshot_id {
         println!("[info] snapshot_id={snapshot_id} (requested)");
@@ -215,15 +231,26 @@ async fn main() -> anyhow::Result<()> {
     );
     println!("[source] fingerprint={source_fingerprint}");
 
-    if requested_snapshot_id.is_none()
-        && let Some(reused) = find_reusable_snapshot(&pool, &source_fingerprint).await?
-    {
+    let reuse_lookup_started = Instant::now();
+    let reused_candidate = if requested_snapshot_id.is_none() {
+        find_reusable_snapshot(&pool, &source_fingerprint).await?
+    } else {
+        None
+    };
+    build_timing.reuse_lookup_sec = reuse_lookup_started.elapsed().as_secs_f64();
+
+    if let Some(reused) = reused_candidate {
+        build_timing.reused_snapshot = true;
+        build_timing.total_sec = total_started.elapsed().as_secs_f64();
         write_report_files(
             &cli.report_dir,
             reused.snapshot_id,
             &build_config,
             &reused.coverage,
             &reused.artifact_url,
+            &source_summary,
+            &source_fingerprint,
+            &build_timing,
         )?;
         println!("[reuse] matched existing ready snapshot");
         println!("[done] snapshot ready: {}", reused.snapshot_id);
@@ -246,8 +273,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let factor_map_started = Instant::now();
     let factor_map = load_method_factor_map(&pool, &method).await?;
+    build_timing.load_method_factors_sec = factor_map_started.elapsed().as_secs_f64();
+
     let snapshot_id = requested_snapshot_id.unwrap_or_else(Uuid::new_v4);
+    let build_started = Instant::now();
     let built = build_sparse_payload(
         &pool,
         snapshot_id,
@@ -260,13 +291,18 @@ async fn main() -> anyhow::Result<()> {
         &factor_map,
     )
     .await?;
+    build_timing.build_sparse_payload_sec = build_started.elapsed().as_secs_f64();
 
+    let encode_started = Instant::now();
     let encoded = encode_snapshot_artifact(
         snapshot_id,
         build_config.clone(),
         built.coverage.clone(),
         &built.data,
     )?;
+    build_timing.encode_artifact_sec = encode_started.elapsed().as_secs_f64();
+
+    let upload_started = Instant::now();
     let artifact_url = store
         .upload_snapshot_artifact(
             snapshot_id,
@@ -275,7 +311,9 @@ async fn main() -> anyhow::Result<()> {
             encoded.bytes,
         )
         .await?;
+    build_timing.upload_artifact_sec = upload_started.elapsed().as_secs_f64();
 
+    let persist_started = Instant::now();
     persist_snapshot_metadata(
         &pool,
         snapshot_id,
@@ -291,6 +329,8 @@ async fn main() -> anyhow::Result<()> {
         encoded.format,
     )
     .await?;
+    build_timing.persist_metadata_sec = persist_started.elapsed().as_secs_f64();
+    build_timing.total_sec = total_started.elapsed().as_secs_f64();
 
     write_report_files(
         &cli.report_dir,
@@ -298,6 +338,9 @@ async fn main() -> anyhow::Result<()> {
         &build_config,
         &built.coverage,
         &artifact_url,
+        &source_summary,
+        &source_fingerprint,
+        &build_timing,
     )?;
 
     println!("[done] snapshot ready: {snapshot_id}");
@@ -517,53 +560,63 @@ async fn build_sparse_payload(
     if processes.is_empty() {
         return Err(anyhow::anyhow!("no processes matched filter"));
     }
+    let process_count_i32 =
+        i32::try_from(processes.len()).map_err(|_| anyhow::anyhow!("process overflow"))?;
 
-    let mut process_keys = Vec::with_capacity(processes.len());
-    let mut process_idx_by_key = HashMap::with_capacity(processes.len());
-    for (idx, proc_row) in processes.iter().enumerate() {
-        let idx_i32 = i32::try_from(idx).map_err(|_| anyhow::anyhow!("process index overflow"))?;
-        process_idx_by_key.insert(proc_row.key.clone(), idx_i32);
-        process_keys.push(proc_row.key.clone());
-    }
+    let chunks = processes
+        .par_iter()
+        .enumerate()
+        .map(
+            |(idx, proc_row)| -> anyhow::Result<(Vec<ParsedExchange>, BTreeSet<Uuid>)> {
+                let process_idx =
+                    i32::try_from(idx).map_err(|_| anyhow::anyhow!("process index overflow"))?;
+                let mut local_exchanges = Vec::new();
+                let mut local_flow_ids = BTreeSet::new();
+
+                for ex in process_exchange_items(&proc_row.json) {
+                    let direction = match ex
+                        .get("exchangeDirection")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                    {
+                        "Input" => Some(ExchangeDirection::Input),
+                        "Output" => Some(ExchangeDirection::Output),
+                        _ => None,
+                    };
+                    let Some(direction) = direction else {
+                        continue;
+                    };
+                    let Some(flow_id) =
+                        parse_uuid_at(ex, &["referenceToFlowDataSet", "@refObjectId"])
+                    else {
+                        continue;
+                    };
+                    let amount = parse_number(
+                        ex.get("meanAmount")
+                            .or_else(|| ex.get("resultingAmount"))
+                            .or_else(|| ex.get("meanValue")),
+                    );
+
+                    local_exchanges.push(ParsedExchange {
+                        process_idx,
+                        flow_id,
+                        direction,
+                        amount,
+                    });
+                    local_flow_ids.insert(flow_id);
+                }
+
+                Ok((local_exchanges, local_flow_ids))
+            },
+        )
+        .collect::<Vec<_>>();
 
     let mut exchanges = Vec::<ParsedExchange>::new();
     let mut flow_candidates: BTreeSet<Uuid> = BTreeSet::new();
-
-    for proc_row in &processes {
-        let process_idx = *process_idx_by_key
-            .get(&proc_row.key)
-            .ok_or_else(|| anyhow::anyhow!("missing process index"))?;
-        for ex in process_exchange_items(&proc_row.json) {
-            let direction = match ex
-                .get("exchangeDirection")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-            {
-                "Input" => Some(ExchangeDirection::Input),
-                "Output" => Some(ExchangeDirection::Output),
-                _ => None,
-            };
-            let Some(direction) = direction else {
-                continue;
-            };
-            let Some(flow_id) = parse_uuid_at(ex, &["referenceToFlowDataSet", "@refObjectId"])
-            else {
-                continue;
-            };
-            let amount = parse_number(
-                ex.get("meanAmount")
-                    .or_else(|| ex.get("resultingAmount"))
-                    .or_else(|| ex.get("meanValue")),
-            );
-
-            exchanges.push(ParsedExchange {
-                process_idx,
-                flow_id,
-                direction,
-                amount,
-            });
-            flow_candidates.insert(flow_id);
-        }
+    for chunk in chunks {
+        let (chunk_exchanges, chunk_flow_ids) = chunk?;
+        exchanges.extend(chunk_exchanges);
+        flow_candidates.extend(chunk_flow_ids);
     }
 
     for flow_id in factor_map.keys() {
@@ -678,8 +731,6 @@ async fn build_sparse_payload(
 
     let mut m_zero_diag_count: i64 = 0;
     let mut m_min_abs_diag = f64::INFINITY;
-    let process_count_i32 =
-        i32::try_from(process_keys.len()).map_err(|_| anyhow::anyhow!("process overflow"))?;
     for idx in 0..process_count_i32 {
         let a_diag = diag_a.get(&idx).copied().unwrap_or(0.0);
         let abs_m_diag = (1.0 - a_diag).abs();
@@ -1010,7 +1061,7 @@ async fn fetch_processes(
     let rows = if all_states {
         sqlx::query(
             r#"
-            SELECT id, version::text AS version, json
+            SELECT json
             FROM public.processes
             WHERE json ? 'processDataSet'
             ORDER BY id, version
@@ -1021,7 +1072,7 @@ async fn fetch_processes(
     } else {
         sqlx::query(
             r#"
-            SELECT id, version::text AS version, json
+            SELECT json
             FROM public.processes
             WHERE state_code = ANY($1)
               AND json ? 'processDataSet'
@@ -1035,10 +1086,7 @@ async fn fetch_processes(
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let id = row.try_get::<Uuid, _>("id")?;
-        let version = row.try_get::<String, _>("version")?;
         out.push(ProcessRow {
-            key: ProcessKey { id, version },
             json: row.try_get::<Value, _>("json")?,
         });
     }
@@ -1052,23 +1100,22 @@ async fn fetch_flow_meta(
     if flow_candidates.is_empty() {
         return Ok(HashMap::new());
     }
-    let candidate_set = flow_candidates.iter().copied().collect::<HashSet<_>>();
+    let candidate_ids = flow_candidates.iter().copied().collect::<Vec<_>>();
     let rows = sqlx::query(
         r#"
-        SELECT id, json
+        SELECT DISTINCT ON (id) id, json
         FROM public.flows
+        WHERE id = ANY($1)
         ORDER BY id, state_code DESC, modified_at DESC NULLS LAST, created_at DESC NULLS LAST
         "#,
     )
+    .bind(&candidate_ids)
     .fetch_all(pool)
     .await?;
 
     let mut out = HashMap::<Uuid, Value>::new();
     for row in rows {
         let id = row.try_get::<Uuid, _>("id")?;
-        if !candidate_set.contains(&id) || out.contains_key(&id) {
-            continue;
-        }
         out.insert(id, row.try_get::<Value, _>("json")?);
     }
     Ok(out)
@@ -1276,6 +1323,9 @@ fn write_report_files(
     config: &SnapshotBuildConfig,
     coverage: &SnapshotCoverageReport,
     artifact_url: &str,
+    source_summary: &SourceSnapshotSummary,
+    source_fingerprint: &str,
+    build_timing: &BuildTimingSec,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(report_dir)?;
     let json_path = report_dir.join(format!("{snapshot_id}.json"));
@@ -1286,6 +1336,11 @@ fn write_report_files(
         "snapshot_id": snapshot_id,
         "generated_at_utc": generated_at,
         "config": config,
+        "source": {
+            "fingerprint": source_fingerprint,
+            "summary": source_summary,
+        },
+        "build_timing_sec": build_timing,
         "coverage": coverage,
         "artifact": {
             "url": artifact_url,
@@ -1313,7 +1368,70 @@ fn write_report_files(
             .map_or_else(|| "none".to_owned(), |id| id.to_string()),
         config.method_version.as_deref().unwrap_or("none")
     ));
+    md.push_str(&format!("- source_fingerprint: `{source_fingerprint}`\n"));
     md.push_str(&format!("- artifact_url: `{artifact_url}`\n\n"));
+
+    md.push_str("## Build Timing (sec)\n\n");
+    md.push_str(&format!(
+        "- reused_snapshot: `{}`\n",
+        build_timing.reused_snapshot
+    ));
+    md.push_str(&format!("- total_sec: `{}`\n", build_timing.total_sec));
+    md.push_str(&format!(
+        "- resolve_method_identity_sec: `{}`\n",
+        build_timing.resolve_method_identity_sec
+    ));
+    md.push_str(&format!(
+        "- compute_source_fingerprint_sec: `{}`\n",
+        build_timing.compute_source_fingerprint_sec
+    ));
+    md.push_str(&format!(
+        "- reuse_lookup_sec: `{}`\n",
+        build_timing.reuse_lookup_sec
+    ));
+    md.push_str(&format!(
+        "- load_method_factors_sec: `{}`\n",
+        build_timing.load_method_factors_sec
+    ));
+    md.push_str(&format!(
+        "- build_sparse_payload_sec: `{}`\n",
+        build_timing.build_sparse_payload_sec
+    ));
+    md.push_str(&format!(
+        "- encode_artifact_sec: `{}`\n",
+        build_timing.encode_artifact_sec
+    ));
+    md.push_str(&format!(
+        "- upload_artifact_sec: `{}`\n",
+        build_timing.upload_artifact_sec
+    ));
+    md.push_str(&format!(
+        "- persist_metadata_sec: `{}`\n\n",
+        build_timing.persist_metadata_sec
+    ));
+
+    md.push_str("## Source Summary\n\n");
+    md.push_str(&format!(
+        "- processes_count: `{}`\n",
+        source_summary.process_count
+    ));
+    md.push_str(&format!(
+        "- processes_max_modified_at_utc: `{}`\n",
+        source_summary.process_max_modified_at_utc
+    ));
+    md.push_str(&format!("- flows_count: `{}`\n", source_summary.flow_count));
+    md.push_str(&format!(
+        "- flows_max_modified_at_utc: `{}`\n",
+        source_summary.flow_max_modified_at_utc
+    ));
+    md.push_str(&format!(
+        "- lciamethods_count: `{}`\n",
+        source_summary.lciamethod_count
+    ));
+    md.push_str(&format!(
+        "- lciamethods_max_modified_at_utc: `{}`\n\n",
+        source_summary.lciamethod_max_modified_at_utc
+    ));
 
     md.push_str("## Matching Coverage\n\n");
     md.push_str(&format!(

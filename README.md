@@ -94,7 +94,7 @@ psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260304120000_lca_drop_l
 - 只取 `state_code=100`（`--process-states` 默认 `100`）
 - 不限 process 数量（`--process-limit` 默认 `0`，即 no limit）
 - 生成 coverage 报表到 `reports/snapshot-coverage/<snapshot_id>.{json,md}`
-- 报表包含三组指标：匹配率、奇异风险、矩阵规模
+- 报表包含：匹配率、奇异风险、矩阵规模、build 分阶段耗时
 - 矩阵 artifact 直接写入 S3（`snapshot-hdf5:v1`）
 
 常用参数：
@@ -119,6 +119,9 @@ psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260304120000_lca_drop_l
   - 基于 `processes/flows/lciamethods` 的 `count(*) + max(modified_at)` 和构建参数计算 fingerprint
   - 若命中已有 `ready` snapshot artifact，则直接复用并秒级返回
   - 若传了 `--snapshot-id`，会按该 ID 执行构建（不走自动复用）
+- 冷构建优化：
+  - flow 元数据按候选 `id` 查询（避免全表扫 `flows`）
+  - process JSON 解析使用并行分片
 
 建议调试流程：
 

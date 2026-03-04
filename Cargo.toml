@@ -21,6 +21,7 @@ hdf5 = "0.8"
 hdf5-sys = { version = "0.8", features = ["static"] }
 hmac = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rayon = "1"
 sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 dashmap = "6"

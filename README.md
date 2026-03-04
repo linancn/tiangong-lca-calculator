@@ -108,6 +108,21 @@ sudo apt-get install -y libsuitesparse-dev libopenblas-dev liblapack-dev pkg-con
 make check
 ```
 
+全量链路调试（prepare + solve + 结果写回 + 日志落盘）：
+
+```bash
+./scripts/run_full_compute_debug.sh --snapshot-id <your-snapshot-uuid>
+```
+
+说明：
+
+- 脚本会启动 `solver-worker`（queue 模式）、投递 `prepare_factorization` 和 `solve_one` 两个 job、轮询状态并打印诊断。
+- 日志默认写到 `logs/full-run/`，包含：
+  - `run-<ts>.log`（执行过程）
+  - `worker-<ts>.log`（worker 详细日志）
+- 若不传 `--snapshot-id`，会自动选最新 snapshot。
+- 需要先确保该 snapshot 在 `lca_*` 表有完整数据，否则脚本会直接报错退出。
+
 启动服务：
 
 ```bash

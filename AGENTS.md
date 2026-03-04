@@ -213,6 +213,8 @@ Input source-of-truth upstream remains:
   - read `processes/flows/lciamethods`
   - materialize `lca_process_index/lca_flow_index/lca_*_entries`
   - write coverage diagnostics
+- The repo now includes `scripts/run_full_compute_debug.sh` for end-to-end queue run with detailed logs.
+- Current blocker for true full-library run remains snapshot backfill (script fails fast if `lca_*` snapshot data is empty).
 - Add integration tests with real Postgres + `pgmq` (containerized).
 - Add artifact reader/decoder utility for `hdf5:v1` outputs.
 - Strengthen job/result diagnostics schema:

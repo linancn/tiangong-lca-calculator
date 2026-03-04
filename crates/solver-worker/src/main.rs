@@ -1,0 +1,79 @@
+mod artifacts;
+mod config;
+mod db;
+mod http;
+mod queue;
+mod storage;
+mod types;
+
+use std::sync::Arc;
+
+use axum::serve;
+use clap::Parser;
+use config::{AppConfig, RunMode};
+use db::AppState;
+use tokio::net::TcpListener;
+use tracing::info;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let config = AppConfig::parse();
+    let state = Arc::new(AppState::new(&config).await?);
+
+    match config.mode {
+        RunMode::Worker => {
+            info!("starting queue worker mode");
+            let queue_name = config.pgmq_queue.clone();
+            queue::run_worker_loop(
+                state,
+                queue_name,
+                config.worker_vt_seconds,
+                config.poll_interval(),
+            )
+            .await?;
+        }
+        RunMode::Http => {
+            info!("starting internal HTTP mode");
+            run_http(state, config.http_socket_addr()?).await?;
+        }
+        RunMode::Both => {
+            info!("starting worker + internal HTTP mode");
+            let worker_state = Arc::clone(&state);
+            let queue_name = config.pgmq_queue.clone();
+            let vt = config.worker_vt_seconds;
+            let poll = config.poll_interval();
+            let worker_handle = tokio::spawn(async move {
+                queue::run_worker_loop(worker_state, queue_name, vt, poll).await
+            });
+
+            let http_handle =
+                tokio::spawn(run_http(Arc::clone(&state), config.http_socket_addr()?));
+
+            tokio::select! {
+                worker_result = worker_handle => {
+                    worker_result??;
+                }
+                http_result = http_handle => {
+                    http_result??;
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("ctrl-c received, exiting");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_http(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    let app = http::router(state);
+    let listener = TcpListener::bind(addr).await?;
+    info!(%addr, "internal HTTP listening");
+    serve(listener, app).await?;
+    Ok(())
+}

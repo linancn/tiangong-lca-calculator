@@ -1,0 +1,147 @@
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Queue payload for worker jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobPayload {
+    /// Build and cache factorization.
+    PrepareFactorization {
+        /// `jobs.id`
+        job_id: Uuid,
+        /// `lca_network_snapshots.id`
+        #[serde(alias = "model_version")]
+        snapshot_id: Uuid,
+        /// Numeric print level.
+        #[serde(default)]
+        print_level: Option<f64>,
+    },
+    /// Solve one RHS with cached factorization.
+    SolveOne {
+        /// `jobs.id`
+        job_id: Uuid,
+        /// `lca_network_snapshots.id`
+        #[serde(alias = "model_version")]
+        snapshot_id: Uuid,
+        /// Demand vector y.
+        rhs: Vec<f64>,
+        /// Output options.
+        #[serde(default)]
+        solve: SolveOptionsPayload,
+        /// Numeric print level.
+        #[serde(default)]
+        print_level: Option<f64>,
+    },
+    /// Solve multiple RHS vectors.
+    SolveBatch {
+        /// `jobs.id`
+        job_id: Uuid,
+        /// `lca_network_snapshots.id`
+        #[serde(alias = "model_version")]
+        snapshot_id: Uuid,
+        /// Demand matrix Y as row-major list of vectors.
+        rhs_batch: Vec<Vec<f64>>,
+        /// Output options.
+        #[serde(default)]
+        solve: SolveOptionsPayload,
+        /// Numeric print level.
+        #[serde(default)]
+        print_level: Option<f64>,
+    },
+    /// Mark cached factorization stale.
+    InvalidateFactorization {
+        /// `jobs.id`
+        job_id: Uuid,
+        /// `lca_network_snapshots.id`
+        #[serde(alias = "model_version")]
+        snapshot_id: Uuid,
+    },
+    /// Rebuild factorization immediately.
+    RebuildFactorization {
+        /// `jobs.id`
+        job_id: Uuid,
+        /// `lca_network_snapshots.id`
+        #[serde(alias = "model_version")]
+        snapshot_id: Uuid,
+        /// Numeric print level.
+        #[serde(default)]
+        print_level: Option<f64>,
+    },
+}
+
+/// Solve output flags from payload.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SolveOptionsPayload {
+    /// Return x.
+    pub return_x: bool,
+    /// Return g.
+    pub return_g: bool,
+    /// Return h.
+    pub return_h: bool,
+}
+
+impl Default for SolveOptionsPayload {
+    fn default() -> Self {
+        Self {
+            return_x: true,
+            return_g: true,
+            return_h: true,
+        }
+    }
+}
+
+/// Internal HTTP solve body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolveHttpBody {
+    /// Single RHS.
+    pub rhs: Option<Vec<f64>>,
+    /// Optional batch RHS.
+    pub rhs_batch: Option<Vec<Vec<f64>>>,
+    /// Solve flags.
+    #[serde(default)]
+    pub solve: SolveOptionsPayload,
+    /// Numeric print level.
+    #[serde(default)]
+    pub print_level: Option<f64>,
+}
+
+/// Internal HTTP prepare body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareHttpBody {
+    /// Numeric print level.
+    #[serde(default)]
+    pub print_level: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::JobPayload;
+
+    #[test]
+    fn deserialize_prepare_payload() {
+        let payload = json!({
+            "type": "prepare_factorization",
+            "job_id": Uuid::nil(),
+            "snapshot_id": Uuid::nil(),
+            "print_level": 0.0
+        });
+
+        let parsed: JobPayload = serde_json::from_value(payload).expect("parse payload");
+        assert!(matches!(parsed, JobPayload::PrepareFactorization { .. }));
+    }
+
+    #[test]
+    fn deserialize_prepare_payload_with_model_version_alias() {
+        let payload = json!({
+            "type": "prepare_factorization",
+            "job_id": Uuid::nil(),
+            "model_version": Uuid::nil()
+        });
+
+        let parsed: JobPayload = serde_json::from_value(payload).expect("parse payload");
+        assert!(matches!(parsed, JobPayload::PrepareFactorization { .. }));
+    }
+}

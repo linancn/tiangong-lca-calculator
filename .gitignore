@@ -1,0 +1,34 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE/editor files
+/.idea/
+/.vscode/
+**/.git.disabled/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and local runtime output
+*.log
+
+# Coverage/profiling artifacts
+coverage/
+*.profraw
+*.profdata
+
+# Supabase local CLI/cache state
+/.supabase/
+/supabase/.temp/
+/supabase/.branches/
+/supabase/.cache/

@@ -1,0 +1,380 @@
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use suitesparse_ffi::{UmfpackError, UmfpackFactorization, UmfpackNumericOptions};
+use thiserror::Error;
+use tracing::instrument;
+use uuid::Uuid;
+
+use crate::{
+    cache::{
+        FactorizationCache, FactorizationKey, FactorizationState, PreparedModel, SolverBackend,
+    },
+    data_builder::{BuiltMatrices, DataBuilder, DataBuilderError, ModelSparseData},
+    validator::{ValidationReport, ValidationStatus, validate_factorization_matrix},
+};
+
+/// Numeric solve options included in factorization key.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NumericOptions {
+    /// UMFPACK verbosity.
+    pub print_level: f64,
+}
+
+impl Default for NumericOptions {
+    fn default() -> Self {
+        Self { print_level: 0.0 }
+    }
+}
+
+/// Solve output selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolveOptions {
+    /// Return x.
+    pub return_x: bool,
+    /// Return g = Bx.
+    pub return_g: bool,
+    /// Return h = Cg.
+    pub return_h: bool,
+}
+
+impl Default for SolveOptions {
+    fn default() -> Self {
+        Self {
+            return_x: true,
+            return_g: true,
+            return_h: true,
+        }
+    }
+}
+
+/// Prepare diagnostics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactorizationDiagnostics {
+    /// Validation report for matrix M.
+    pub validation: ValidationReport,
+    /// Backend.
+    pub backend: SolverBackend,
+    /// Matrix nnz stats.
+    pub m_nnz: usize,
+    /// Matrix nnz stats.
+    pub b_nnz: usize,
+    /// Matrix nnz stats.
+    pub c_nnz: usize,
+}
+
+/// Result of prepare stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrepareResult {
+    /// Factorization id.
+    pub factorization_id: String,
+    /// State in cache.
+    pub status: FactorizationState,
+    /// Diagnostics.
+    pub diagnostics: FactorizationDiagnostics,
+}
+
+/// Single RHS solve result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SolveResult {
+    /// Optional x.
+    pub x: Option<Vec<f64>>,
+    /// Optional g = Bx.
+    pub g: Option<Vec<f64>>,
+    /// Optional h = Cg.
+    pub h: Option<Vec<f64>>,
+    /// Factorization state at solve time.
+    pub factorization_state: FactorizationState,
+}
+
+/// Multi-RHS solve result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SolveBatchResult {
+    /// Solve outputs for each RHS.
+    pub items: Vec<SolveResult>,
+}
+
+/// Solver layer errors.
+#[derive(Debug, Error)]
+pub enum SolverError {
+    #[error("data builder failed: {0}")]
+    DataBuilder(#[from] DataBuilderError),
+    #[error("factorization failed: {0}")]
+    Factorization(#[from] UmfpackError),
+    #[error("factorization key not prepared for model {model_version}")]
+    NotPrepared { model_version: Uuid },
+    #[error("matrix validation failed: {0:?}")]
+    ValidationFailed(ValidationReport),
+    #[error("rhs dimension {rhs_len} does not match process count {process_count}")]
+    RhsDimensionMismatch {
+        rhs_len: usize,
+        process_count: usize,
+    },
+}
+
+/// Orchestrates prepare/solve/invalidate with in-memory factorization cache.
+#[derive(Debug, Default)]
+pub struct SolverService {
+    cache: FactorizationCache,
+    builder: DataBuilder,
+}
+
+impl SolverService {
+    /// Creates service with default builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            cache: FactorizationCache::new(),
+            builder: DataBuilder::default(),
+        }
+    }
+
+    /// Returns cache handle.
+    #[must_use]
+    pub fn cache(&self) -> &FactorizationCache {
+        &self.cache
+    }
+
+    /// Prepares and caches factorization for one model version.
+    #[instrument(skip_all, fields(model_version = %data.model_version))]
+    pub fn prepare(
+        &self,
+        data: &ModelSparseData,
+        options: NumericOptions,
+    ) -> Result<PrepareResult, SolverError> {
+        let key = Self::factorization_key(data.model_version, options);
+        self.cache.set_building(key.clone());
+
+        let matrices = self.builder.build(data)?;
+        let validation = validate_factorization_matrix(&matrices.m, 1e-12);
+
+        if validation.status == ValidationStatus::FailedInvalidStructure {
+            self.cache.set_failed(
+                key.clone(),
+                "matrix structural validation failed".to_owned(),
+            );
+            return Err(SolverError::ValidationFailed(validation));
+        }
+
+        let factorization = Arc::new(UmfpackFactorization::factorize(
+            matrices.m.clone(),
+            UmfpackNumericOptions {
+                print_level: options.print_level,
+            },
+        )?);
+
+        let prepared = Arc::new(PreparedModel {
+            factorization,
+            b: matrices.b,
+            c: matrices.c,
+            validation: validation.clone(),
+        });
+
+        self.cache.set_ready(key.clone(), prepared);
+
+        Ok(PrepareResult {
+            factorization_id: key.factorization_id(),
+            status: FactorizationState::Ready,
+            diagnostics: FactorizationDiagnostics {
+                validation,
+                backend: SolverBackend::Umfpack,
+                m_nnz: matrices.m_nnz,
+                b_nnz: matrices.b_nnz,
+                c_nnz: matrices.c_nnz,
+            },
+        })
+    }
+
+    /// Returns factorization state for model+options.
+    #[must_use]
+    pub fn factorization_status(
+        &self,
+        model_version: Uuid,
+        options: NumericOptions,
+    ) -> Option<FactorizationState> {
+        let key = Self::factorization_key(model_version, options);
+        self.cache.state(&key)
+    }
+
+    /// Solves one RHS using prepared factorization.
+    #[instrument(skip_all, fields(model_version = %model_version))]
+    pub fn solve_one(
+        &self,
+        model_version: Uuid,
+        options: NumericOptions,
+        rhs: &[f64],
+        solve_options: SolveOptions,
+    ) -> Result<SolveResult, SolverError> {
+        let key = Self::factorization_key(model_version, options);
+        let prepared = self
+            .cache
+            .get_ready(&key)
+            .ok_or(SolverError::NotPrepared { model_version })?;
+
+        let process_count =
+            usize::try_from(prepared.factorization.matrix().ncols).unwrap_or_default();
+        if rhs.len() != process_count {
+            return Err(SolverError::RhsDimensionMismatch {
+                rhs_len: rhs.len(),
+                process_count,
+            });
+        }
+
+        let x = prepared.factorization.solve(rhs)?;
+        let g = if solve_options.return_g || solve_options.return_h {
+            Some(prepared.b.mul_vector(&x))
+        } else {
+            None
+        };
+
+        let h = if solve_options.return_h {
+            g.as_ref().map(|g_vec| prepared.c.mul_vector(g_vec))
+        } else {
+            None
+        };
+
+        Ok(SolveResult {
+            x: solve_options.return_x.then_some(x),
+            g: solve_options.return_g.then_some(g.unwrap_or_default()),
+            h,
+            factorization_state: FactorizationState::Ready,
+        })
+    }
+
+    /// Solves multiple RHS vectors by repeated back-substitution.
+    pub fn solve_batch(
+        &self,
+        model_version: Uuid,
+        options: NumericOptions,
+        rhs_batch: &[Vec<f64>],
+        solve_options: SolveOptions,
+    ) -> Result<SolveBatchResult, SolverError> {
+        let mut items = Vec::with_capacity(rhs_batch.len());
+        for rhs in rhs_batch {
+            items.push(self.solve_one(model_version, options, rhs, solve_options)?);
+        }
+        Ok(SolveBatchResult { items })
+    }
+
+    /// Invalidates all cache entries for the model version.
+    #[must_use]
+    pub fn invalidate(&self, model_version: Uuid) -> usize {
+        self.cache.invalidate_model(model_version)
+    }
+
+    /// Builds factorization key from inputs.
+    #[must_use]
+    pub fn factorization_key(model_version: Uuid, options: NumericOptions) -> FactorizationKey {
+        let options_bytes = options.print_level.to_le_bytes();
+        FactorizationKey::new(model_version, SolverBackend::Umfpack, &options_bytes)
+    }
+
+    #[allow(dead_code)]
+    fn _matrices_for_test(&self, data: &ModelSparseData) -> Result<BuiltMatrices, SolverError> {
+        Ok(self.builder.build(data)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use approx::assert_relative_eq;
+    use uuid::Uuid;
+
+    use crate::{
+        data_builder::{ModelSparseData, SparseTriplet},
+        service::{NumericOptions, SolveOptions, SolverService},
+    };
+
+    #[test]
+    fn prepare_and_solve_pipeline() {
+        let model_version = Uuid::new_v4();
+        let data = ModelSparseData {
+            model_version,
+            process_count: 2,
+            flow_count: 1,
+            impact_count: 1,
+            technosphere_entries: vec![
+                SparseTriplet {
+                    row: 0,
+                    col: 1,
+                    value: 0.5,
+                },
+                SparseTriplet {
+                    row: 1,
+                    col: 0,
+                    value: 0.25,
+                },
+            ],
+            biosphere_entries: vec![
+                SparseTriplet {
+                    row: 0,
+                    col: 0,
+                    value: 2.0,
+                },
+                SparseTriplet {
+                    row: 0,
+                    col: 1,
+                    value: 3.0,
+                },
+            ],
+            characterization_factors: vec![SparseTriplet {
+                row: 0,
+                col: 0,
+                value: 0.1,
+            }],
+        };
+
+        let service = SolverService::new();
+        let _prepare = service
+            .prepare(&data, NumericOptions::default())
+            .expect("prepare factorization");
+
+        let solved = service
+            .solve_one(
+                model_version,
+                NumericOptions::default(),
+                &[1.0, 2.0],
+                SolveOptions::default(),
+            )
+            .expect("solve");
+
+        let x = solved.x.expect("x");
+        let g = solved.g.expect("g");
+        let h = solved.h.expect("h");
+
+        assert_relative_eq!(x[0], 2.285_714_285_7, epsilon = 1e-9);
+        assert_relative_eq!(x[1], 2.571_428_571_4, epsilon = 1e-9);
+        assert_relative_eq!(g[0], 12.285_714_285_7, epsilon = 1e-9);
+        assert_relative_eq!(h[0], 1.228_571_428_57, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn invalidate_marks_entries_stale() {
+        let model_version = Uuid::new_v4();
+        let data = ModelSparseData {
+            model_version,
+            process_count: 1,
+            flow_count: 1,
+            impact_count: 1,
+            technosphere_entries: vec![],
+            biosphere_entries: vec![SparseTriplet {
+                row: 0,
+                col: 0,
+                value: 1.0,
+            }],
+            characterization_factors: vec![SparseTriplet {
+                row: 0,
+                col: 0,
+                value: 1.0,
+            }],
+        };
+
+        let service = SolverService::new();
+        service
+            .prepare(&data, NumericOptions::default())
+            .expect("prepare factorization");
+
+        let count = service.invalidate(model_version);
+        assert_eq!(count, 1);
+    }
+}

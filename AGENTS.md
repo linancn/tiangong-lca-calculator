@@ -138,6 +138,7 @@ Latest checks passed:
 - `scripts/build_snapshot_from_ilcd.sh` now supports full-library build by default:
   - default `--process-states 100` (only `state_code=100`)
   - default `--process-limit 0` (no limit)
+  - supports `--process-states all` to disable `state_code` filtering entirely
 - Coverage report is generated per snapshot:
   - `reports/snapshot-coverage/<snapshot_id>.json`
   - `reports/snapshot-coverage/<snapshot_id>.md`
@@ -147,6 +148,7 @@ Latest checks passed:
   - matrix scale (`process_count`, `flow_count`, `impact_count`, `a_nnz`, `b_nnz`, `c_nnz`, `m_nnz_estimated`, `m_sparsity_estimated`)
 - The script computes/report metrics in the same SQL build transaction and parses a `COVERAGE_METRICS|...` line, avoiding a second heavy full-table re-scan.
 - Full-library default run (`process_limit=0`, `state_code=100`) has been verified successfully on current DB (`process_count=2025`) and feeds `run_full_compute_debug.sh` end-to-end (`prepare -> solve -> S3 HDF5 result`).
+- Full-library run without `state_code` filter has been verified (`--process-states all`): snapshot `7b0502b1-96e6-4c33-81b5-c48aae7725ff` (`process_count=22904`) with end-to-end queue run success (`prepare -> solve_one -> S3 HDF5 result`).
 - `scripts/run_full_compute_debug.sh` now writes one run report per execution:
   - default `reports/full-run/run-<ts>.json`
   - default `reports/full-run/run-<ts>.md`

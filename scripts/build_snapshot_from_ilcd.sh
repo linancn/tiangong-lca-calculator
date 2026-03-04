@@ -28,6 +28,8 @@ SNAPSHOT_ID="${SNAPSHOT_ID:-}"
 METHOD_ID="${METHOD_ID:-}"
 METHOD_VERSION="${METHOD_VERSION:-}"
 NO_LCIA=0
+ALL_STATES=0
+PROCESS_STATES_LABEL=""
 
 usage() {
   cat <<'USAGE'
@@ -38,7 +40,7 @@ Usage:
 
 Options:
   --snapshot-id <uuid>         explicit snapshot id (default: auto generated)
-  --process-states <csv>       process state_code filter (default: "100")
+  --process-states <csv|all>   process state_code filter, use "all" to disable filter (default: "100")
   --process-limit <n>          limit processes for debug snapshot, 0 = no limit (default: 0)
   --provider-rule <rule>       provider matching rule (default: strict_unique_provider)
   --self-loop-cutoff <float>   drop technosphere diagonal edges with |value| >= cutoff (default: 0.999999)
@@ -106,6 +108,14 @@ while [ "$#" -gt 0 ]; do
 done
 
 PROCESS_STATES="$(echo "$PROCESS_STATES" | tr -d ' ')"
+PROCESS_STATES_LABEL="$PROCESS_STATES"
+
+if [ -z "$PROCESS_STATES" ] || [ "$PROCESS_STATES" = "all" ]; then
+  ALL_STATES=1
+  # Keep SQL casts valid while bypassing filter with all_states flag.
+  PROCESS_STATES="0"
+  PROCESS_STATES_LABEL="all"
+fi
 
 if [ -z "$SNAPSHOT_ID" ]; then
   SNAPSHOT_ID="$(cat /proc/sys/kernel/random/uuid)"
@@ -156,7 +166,7 @@ fi
 
 echo "[info] building snapshot"
 echo "  snapshot_id   = $SNAPSHOT_ID"
-echo "  process_states= $PROCESS_STATES"
+echo "  process_states= $PROCESS_STATES_LABEL"
 echo "  process_limit = $PROCESS_LIMIT"
 echo "  provider_rule = $PROVIDER_RULE"
 echo "  self_loop_cutoff = $SELF_LOOP_CUTOFF"
@@ -173,6 +183,7 @@ BUILD_OUTPUT="$(
 psql "$DB_URL" -Atq -v ON_ERROR_STOP=1 \
   -v snapshot_id="$SNAPSHOT_ID" \
   -v process_states="$PROCESS_STATES" \
+  -v all_states="$ALL_STATES" \
   -v process_limit="$PROCESS_LIMIT" \
   -v provider_rule="$PROVIDER_RULE" \
   -v self_loop_cutoff="$SELF_LOOP_CUTOFF" \
@@ -202,7 +213,15 @@ VALUES (
   CASE WHEN :'has_lcia'::int = 1 THEN :'method_id'::uuid ELSE NULL END,
   CASE WHEN :'has_lcia'::int = 1 THEN :'method_version'::bpchar ELSE NULL END,
   'draft',
-  jsonb_build_object('process_states', string_to_array(:'process_states', ',')::int[]),
+  CASE
+    WHEN :'all_states'::int = 1 THEN jsonb_build_object('all_states', true)
+    ELSE jsonb_build_object(
+      'all_states',
+      false,
+      'process_states',
+      string_to_array(:'process_states', ',')::int[]
+    )
+  END,
   NOW(),
   NOW()
 );
@@ -210,7 +229,11 @@ VALUES (
 WITH candidate_processes AS (
   SELECT p.id, p.version, p.state_code
   FROM public.processes p
-  WHERE p.state_code = ANY (string_to_array(:'process_states', ',')::int[])
+  WHERE
+    (
+      :'all_states'::int = 1
+      OR p.state_code = ANY (string_to_array(:'process_states', ',')::int[])
+    )
     AND p.json ? 'processDataSet'
   ORDER BY p.id, p.version
   LIMIT NULLIF(:'process_limit'::int, 0)
@@ -698,7 +721,7 @@ cat > "$REPORT_JSON_PATH" <<JSON
   "snapshot_id": "$SNAPSHOT_ID",
   "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "config": {
-    "process_states": "$PROCESS_STATES",
+    "process_states": "$PROCESS_STATES_LABEL",
     "process_limit": $PROCESS_LIMIT,
     "provider_rule": "$PROVIDER_RULE",
     "self_loop_cutoff": $SELF_LOOP_CUTOFF,
@@ -742,7 +765,7 @@ cat > "$REPORT_MD_PATH" <<MD
 
 - snapshot_id: \`$SNAPSHOT_ID\`
 - generated_at_utc: \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\`
-- process_states: \`$PROCESS_STATES\`
+- process_states: \`$PROCESS_STATES_LABEL\`
 - process_limit: \`$PROCESS_LIMIT\`
 - provider_rule: \`$PROVIDER_RULE\`
 - self_loop_cutoff: \`$SELF_LOOP_CUTOFF\`

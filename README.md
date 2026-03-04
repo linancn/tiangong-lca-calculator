@@ -87,6 +87,7 @@ psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260304073000_lca_snapsh
 常用参数：
 
 - `--process-limit 100`：先做小样本调试 snapshot（正式跑不要加）
+- `--process-states all`：取消 `state_code` 过滤，按所有 `processes` 构建 snapshot
 - `--no-lcia`：先不构建 C 矩阵（只跑到 LCI）
 - `--method-id <uuid> --method-version <ver>`：指定 LCIA 方法
 - `--self-loop-cutoff 0.999999`：过滤会导致 `M = I - A` 奇异的对角自环（`|A_ii|` 过大）

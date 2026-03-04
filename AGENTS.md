@@ -93,9 +93,9 @@ Verification done at migration time:
 Hybrid persistence is now active in `solver-worker`:
 
 - Always encode result artifact as:
-  - `MessagePack + zstd(level=3)`
-  - format id: `msgpack+zstd:v1`
-  - extension: `.msgpack.zst`
+  - `HDF5`
+  - format id: `hdf5:v1`
+  - extension: `.h5`
   - checksum: SHA-256 (hex)
 - If encoded bytes `< RESULT_INLINE_MAX_BYTES` (default 256KB):
   - store JSON payload inline in `lca_results.payload`
@@ -120,6 +120,8 @@ Object storage config keys:
 - optional `S3_PREFIX` (default `lca-results`)
 
 Uploads are authenticated with AWS SigV4 (`Authorization` + `x-amz-date` + `x-amz-content-sha256`).
+
+`HDF5` build mode in this repo uses `hdf5-sys(static)`; build host must provide `cmake`.
 
 `DATABASE_URL` is preferred DB env var; `CONN` is accepted fallback.
 
@@ -162,7 +164,7 @@ Latest checks passed:
   - updates `lca_jobs`
   - writes `lca_results` payload/metadata
 - `src/artifacts.rs`:
-  - artifact envelope encode (`msgpack+zstd:v1`)
+  - artifact envelope encode (`hdf5:v1`)
   - SHA-256 checksum
 - `src/storage.rs`:
   - S3-compatible upload client (path-style PUT)
@@ -212,7 +214,7 @@ Input source-of-truth upstream remains:
   - materialize `lca_process_index/lca_flow_index/lca_*_entries`
   - write coverage diagnostics
 - Add integration tests with real Postgres + `pgmq` (containerized).
-- Add artifact reader/decoder utility for `msgpack+zstd:v1` outputs.
+- Add artifact reader/decoder utility for `hdf5:v1` outputs.
 - Strengthen job/result diagnostics schema:
   - factorization stats
   - timing breakdown
@@ -247,7 +249,7 @@ Install system deps (Ubuntu):
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y libsuitesparse-dev libopenblas-dev liblapack-dev pkg-config
+sudo apt-get install -y libsuitesparse-dev libopenblas-dev liblapack-dev pkg-config cmake
 ```
 
 Run checks:

@@ -286,10 +286,9 @@
 当前实现格式：
 
 - 位置：Supabase Storage（或 S3 等对象存储）
-- 编码：`MessagePack`
-- 压缩：`zstd`（level 3）
-- 格式标识：`msgpack+zstd:v1`
-- 后缀：`.msgpack.zst`
+- 容器：`HDF5`
+- 格式标识：`hdf5:v1`
+- 后缀：`.h5`
 - 校验：`SHA-256`
 
 ### 9.3 建议阈值

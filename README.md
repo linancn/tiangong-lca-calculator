@@ -32,10 +32,9 @@
 
 对象存储中的大结果采用：
 
-- 编码：`MessagePack`
-- 压缩：`zstd`（level 3）
-- 格式标识：`msgpack+zstd:v1`
-- 文件后缀：`.msgpack.zst`
+- 容器：`HDF5`
+- 格式标识：`hdf5:v1`
+- 文件后缀：`.h5`
 - 哈希：`SHA-256`
 
 默认阈值：
@@ -98,8 +97,10 @@ Ubuntu 依赖：
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y libsuitesparse-dev libopenblas-dev liblapack-dev pkg-config
+sudo apt-get install -y libsuitesparse-dev libopenblas-dev liblapack-dev pkg-config cmake
 ```
+
+说明：`HDF5` 通过 `hdf5-sys(static)` 在编译期构建，因此需要本机可用 `cmake`。
 
 质量检查：
 

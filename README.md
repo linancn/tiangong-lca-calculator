@@ -155,6 +155,9 @@ make check
 - 日志默认写到 `logs/full-run/`，包含：
   - `run-<ts>.log`（执行过程）
   - `worker-<ts>.log`（worker 详细日志）
+- 报表默认写到 `reports/full-run/`，包含：
+  - `run-<ts>.json`（结构化结果 + 阶段耗时）
+  - `run-<ts>.md`（便于人工查看）
 - 若不传 `--snapshot-id`，会自动选最新 snapshot。
 - 需要先确保该 snapshot 在 `lca_*` 表有完整数据，否则脚本会直接报错退出。
 

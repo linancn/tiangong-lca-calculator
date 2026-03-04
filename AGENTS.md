@@ -147,6 +147,10 @@ Latest checks passed:
   - matrix scale (`process_count`, `flow_count`, `impact_count`, `a_nnz`, `b_nnz`, `c_nnz`, `m_nnz_estimated`, `m_sparsity_estimated`)
 - The script computes/report metrics in the same SQL build transaction and parses a `COVERAGE_METRICS|...` line, avoiding a second heavy full-table re-scan.
 - Full-library default run (`process_limit=0`, `state_code=100`) has been verified successfully on current DB (`process_count=2025`) and feeds `run_full_compute_debug.sh` end-to-end (`prepare -> solve -> S3 HDF5 result`).
+- `scripts/run_full_compute_debug.sh` now writes one run report per execution:
+  - default `reports/full-run/run-<ts>.json`
+  - default `reports/full-run/run-<ts>.md`
+  - includes total/worker-start/prepare/solve timing, job ids/status, matrix nnz summary, artifact metadata, log paths.
 
 ## 3. Architecture map
 

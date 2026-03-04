@@ -84,10 +84,13 @@ psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260304073000_lca_snapsh
 - `S3_ENDPOINT`
 - `S3_REGION`
 - `S3_BUCKET`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- `S3_SESSION_TOKEN`（可选，临时凭证时使用）
 - `S3_PREFIX`（默认 `lca-results`）
 - `RESULT_INLINE_MAX_BYTES`（默认 `262144`）
 
-说明：`S3_ENDPOINT/S3_REGION/S3_BUCKET` 需要同时提供，缺任何一项会启动失败。
+说明：`S3_ENDPOINT/S3_REGION/S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY` 需要同时提供，缺任何一项会启动失败。上传请求使用 SigV4 签名认证。
 
 ## 6. 启动与检查
 

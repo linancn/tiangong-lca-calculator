@@ -8,7 +8,10 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+chrono.workspace = true
 clap.workspace = true
+hex.workspace = true
+hmac.workspace = true
 reqwest.workspace = true
 rmp-serde.workspace = true
 sha2.workspace = true

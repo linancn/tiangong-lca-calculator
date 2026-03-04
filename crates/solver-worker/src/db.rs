@@ -41,19 +41,43 @@ impl AppState {
     pub async fn new(config: &AppConfig) -> anyhow::Result<Self> {
         let pool = PgPool::connect(config.resolved_database_url()?).await?;
 
-        let object_store = match (&config.s3_endpoint, &config.s3_region, &config.s3_bucket) {
-            (Some(endpoint), Some(region), Some(bucket)) => Some(ObjectStoreClient::new(
+        let s3_any_set = config.s3_endpoint.is_some()
+            || config.s3_region.is_some()
+            || config.s3_bucket.is_some()
+            || config.s3_access_key_id.is_some()
+            || config.s3_secret_access_key.is_some()
+            || config.s3_session_token.is_some();
+
+        let object_store = if s3_any_set {
+            let endpoint = config.s3_endpoint.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("incomplete S3 config: missing S3_ENDPOINT for object storage")
+            })?;
+            let region = config.s3_region.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("incomplete S3 config: missing S3_REGION for object storage")
+            })?;
+            let bucket = config.s3_bucket.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("incomplete S3 config: missing S3_BUCKET for object storage")
+            })?;
+            let access_key_id = config.s3_access_key_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("incomplete S3 config: missing S3_ACCESS_KEY_ID for object storage")
+            })?;
+            let secret_access_key = config.s3_secret_access_key.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "incomplete S3 config: missing S3_SECRET_ACCESS_KEY for object storage"
+                )
+            })?;
+
+            Some(ObjectStoreClient::new(
                 endpoint,
-                region.clone(),
-                bucket.clone(),
+                region,
+                bucket,
                 &config.s3_prefix,
-            )?),
-            (None, None, None) => None,
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "incomplete S3 config: provide S3_ENDPOINT, S3_REGION and S3_BUCKET together"
-                ));
-            }
+                access_key_id,
+                secret_access_key,
+                config.s3_session_token.clone(),
+            )?)
+        } else {
+            None
         };
 
         Ok(Self {

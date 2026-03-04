@@ -47,6 +47,15 @@ pub struct AppConfig {
     /// S3 bucket.
     #[arg(long, env = "S3_BUCKET")]
     pub s3_bucket: Option<String>,
+    /// S3 access key id for `SigV4` authenticated uploads.
+    #[arg(long, env = "S3_ACCESS_KEY_ID")]
+    pub s3_access_key_id: Option<String>,
+    /// S3 secret access key for `SigV4` authenticated uploads.
+    #[arg(long, env = "S3_SECRET_ACCESS_KEY")]
+    pub s3_secret_access_key: Option<String>,
+    /// Optional S3 session token for temporary credentials.
+    #[arg(long, env = "S3_SESSION_TOKEN")]
+    pub s3_session_token: Option<String>,
     /// Object key prefix under the bucket.
     #[arg(long, env = "S3_PREFIX", default_value = "lca-results")]
     pub s3_prefix: String,

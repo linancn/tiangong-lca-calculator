@@ -114,7 +114,12 @@ Object storage config keys:
 - `S3_ENDPOINT`
 - `S3_REGION`
 - `S3_BUCKET`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- optional `S3_SESSION_TOKEN`
 - optional `S3_PREFIX` (default `lca-results`)
+
+Uploads are authenticated with AWS SigV4 (`Authorization` + `x-amz-date` + `x-amz-content-sha256`).
 
 `DATABASE_URL` is preferred DB env var; `CONN` is accepted fallback.
 
@@ -194,7 +199,7 @@ Input source-of-truth upstream remains:
 - Factorization cache is process-local memory only.
 - No persisted factorization snapshots across restart.
 - Internal HTTP endpoints do not enforce auth (assumed trusted internal network).
-- Object storage uploader currently uses unsigned PUT; suited for public-write/internal bucket policy, not hardened private-bucket production yet.
+- Current uploader supports static key/secret (+ optional session token) credentials; key rotation and STS refresh are not yet automated.
 - No advanced contribution/post-processing yet.
 - Backend is UMFPACK-only; CHOLMOD/SPQR not exposed yet.
 

@@ -156,6 +156,8 @@ Latest checks passed:
 - `./scripts/run_bw25_validation.sh --result-id 1b0a8cdd-2b08-45e4-85a6-43255ae6ecc0 --report-dir reports/bw25-validation-persistence-split`
 - `./scripts/run_full_compute_debug.sh --result-persist-mode inline-only --report-dir reports/full-run-inline-only --log-dir logs/full-run-inline-only`
 - `./scripts/run_bw25_validation.sh --result-id 3c06c0c4-c846-46dc-b8f8-d9343aff15ce --report-dir reports/bw25-validation-inline-only`
+- `./scripts/run_full_compute_debug.sh --result-persist-mode inline-only --report-dir reports/full-run-ms-precision --log-dir logs/full-run-ms-precision`
+- `./scripts/run_bw25_validation.sh --result-id 50f6f0c2-863a-49df-ba63-383ac77d51e7 --report-dir reports/bw25-validation-ms-precision`
 
 ### 2.7 Repository hygiene/docs organization (implemented)
 
@@ -206,7 +208,11 @@ Latest checks passed:
 - `scripts/run_full_compute_debug.sh` now writes one run report per execution and reads matrix scale from `lca_snapshot_artifacts` first (fallback to legacy tables):
   - default `reports/full-run/run-<ts>.json`
   - default `reports/full-run/run-<ts>.md`
-  - includes total/worker-start/prepare/solve timing, plus merged `build_snapshot` and `build_and_compute_total`, job ids/status, matrix nnz summary, artifact metadata, result compute/persistence timing split, log paths.
+  - includes nanosecond-sampled local timing (seconds with 6 decimals), plus merged `build_snapshot` and `build_and_compute_total`, job ids/status, matrix nnz summary, artifact metadata, result compute/persistence timing split, log paths.
+  - includes DB-derived job timing:
+    - `job_timing_sec.prepare.{queue_wait,run,end_to_end}`
+    - `job_timing_sec.solve.{queue_wait,run,end_to_end}`
+    - UTC timestamps under `jobs.{prepare_*,solve_*}`
   - auto-discovers latest snapshot coverage report by `snapshot_id` and attaches build source metadata (`reused_snapshot`, `build_report_json`) into full-run report.
 
 ### 2.6 Brightway25 validation path (manual-only)
@@ -346,6 +352,7 @@ Input source-of-truth upstream remains:
 - Brightway validation assumes snapshot/result artifact schema `v1` (`snapshot-hdf5:v1`, `hdf5:v1`).
 - Current `persistence_timing_sec.db_write_sec` measures `INSERT lca_results` latency; diagnostics are finalized with a follow-up `UPDATE`, which is not included in `db_write_sec`.
 - `inline-only` benchmark mode still writes full JSON payload to `lca_results`; for very large vectors this can increase DB row size/IO.
+- `timing_sec.prepare_job/solve_job` are orchestrator wall-clock spans and intentionally differ from DB `job_timing_sec.*` (which isolates queue wait/run/end-to-end from DB timestamps).
 
 ## 6. TODO backlog (priority)
 

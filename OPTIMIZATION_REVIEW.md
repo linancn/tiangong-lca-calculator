@@ -44,10 +44,14 @@ Conclusion:
   - `crates/solver-worker/src/db.rs` (`inline-only` skips artifact encode/upload)
   - `scripts/run_full_compute_debug.sh --result-persist-mode <mode>`
 
-3. Improve full-run report precision
+3. Improve full-run report precision (Completed 2026-03-05)
 - Current shell report rounds to integer seconds for some fields.
 - Use DB timestamps and/or millisecond precision for `prepare/solve`.
 - Goal: accurate short-job comparisons.
+- Implemented in:
+  - `scripts/run_full_compute_debug.sh` local timing: nanosecond sampling with 6-decimal second output
+  - `scripts/run_full_compute_debug.sh` DB job timing: `job_timing_sec.{prepare,solve}.{queue_wait,run,end_to_end}`
+  - job UTC timestamps persisted in report under `jobs.{prepare_*,solve_*}`
 
 ### P1
 

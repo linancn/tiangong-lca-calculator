@@ -275,14 +275,14 @@ WORKER_LOG="$LOG_DIR/worker-$RUN_TS.log"
 REPORT_JSON="$REPORT_DIR/run-$RUN_TS.json"
 REPORT_MD="$REPORT_DIR/run-$RUN_TS.md"
 
-RUN_START_EPOCH="$(date +%s)"
+RUN_START_NS="$(date +%s%N)"
 RUN_START_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-WORKER_START_EPOCH=""
-WORKER_READY_EPOCH=""
-PREPARE_ENQUEUE_EPOCH=""
-PREPARE_DONE_EPOCH=""
-SOLVE_ENQUEUE_EPOCH=""
-SOLVE_DONE_EPOCH=""
+WORKER_START_NS=""
+WORKER_READY_NS=""
+PREPARE_ENQUEUE_NS=""
+PREPARE_DONE_NS=""
+SOLVE_ENQUEUE_NS=""
+SOLVE_DONE_NS=""
 PREPARE_JOB_ID=""
 SOLVE_JOB_ID=""
 RESULT_ID=""
@@ -290,6 +290,20 @@ RESULT_ARTIFACT_FORMAT=""
 RESULT_ARTIFACT_SIZE=""
 RESULT_ARTIFACT_URL=""
 RESULT_HAS_INLINE_PAYLOAD=""
+PREPARE_DB_STATUS=""
+PREPARE_DB_QUEUE_WAIT_SEC=""
+PREPARE_DB_RUN_SEC=""
+PREPARE_DB_END_TO_END_SEC=""
+PREPARE_DB_CREATED_UTC=""
+PREPARE_DB_STARTED_UTC=""
+PREPARE_DB_FINISHED_UTC=""
+SOLVE_DB_STATUS=""
+SOLVE_DB_QUEUE_WAIT_SEC=""
+SOLVE_DB_RUN_SEC=""
+SOLVE_DB_END_TO_END_SEC=""
+SOLVE_DB_CREATED_UTC=""
+SOLVE_DB_STARTED_UTC=""
+SOLVE_DB_FINISHED_UTC=""
 
 exec > >(tee -a "$RUN_LOG") 2>&1
 
@@ -345,26 +359,76 @@ elapsed_or_null() {
   local start="$1"
   local end="$2"
   if [ -n "$start" ] && [ -n "$end" ]; then
-    printf '%s' "$((end - start))"
+    awk -v s="$start" -v e="$end" 'BEGIN{printf "%.6f", (e - s) / 1000000000}'
   else
     printf 'null'
   fi
 }
 
+now_ns() {
+  date +%s%N
+}
+
+empty_to_null() {
+  local value="$1"
+  if [ -n "$value" ]; then
+    printf '%s' "$value"
+  else
+    printf 'null'
+  fi
+}
+
+empty_to_json_string_or_null() {
+  local value="$1"
+  if [ -n "$value" ]; then
+    as_json_string "$value"
+  else
+    printf 'null'
+  fi
+}
+
+load_job_timing_from_db() {
+  local job_id="$1"
+  local prefix="$2"
+  local line status queue_wait run_sec end_to_end created_utc started_utc finished_utc
+  line="$(sql_scalar_soft "
+  SELECT
+    COALESCE(status, ''),
+    COALESCE(EXTRACT(EPOCH FROM (started_at - created_at))::text, ''),
+    COALESCE(EXTRACT(EPOCH FROM (COALESCE(finished_at, updated_at) - started_at))::text, ''),
+    COALESCE(EXTRACT(EPOCH FROM (COALESCE(finished_at, updated_at) - created_at))::text, ''),
+    COALESCE(to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), ''),
+    COALESCE(to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), ''),
+    COALESCE(to_char(COALESCE(finished_at, updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), '')
+  FROM public.lca_jobs
+  WHERE id = '$job_id'::uuid
+  LIMIT 1;
+  ")"
+
+  IFS='|' read -r status queue_wait run_sec end_to_end created_utc started_utc finished_utc <<< "$line"
+  eval "${prefix}_STATUS=\"\$status\""
+  eval "${prefix}_QUEUE_WAIT_SEC=\"\$queue_wait\""
+  eval "${prefix}_RUN_SEC=\"\$run_sec\""
+  eval "${prefix}_END_TO_END_SEC=\"\$end_to_end\""
+  eval "${prefix}_CREATED_UTC=\"\$created_utc\""
+  eval "${prefix}_STARTED_UTC=\"\$started_utc\""
+  eval "${prefix}_FINISHED_UTC=\"\$finished_utc\""
+}
+
 write_run_report() {
   local exit_code="$1"
-  local run_end_epoch run_end_iso run_status total_elapsed
+  local run_end_ns run_end_iso run_status total_elapsed
   local worker_start_elapsed prepare_elapsed solve_elapsed
   local build_snapshot_json build_plus_compute_json build_reused_json
   local build_snapshot_md build_plus_compute_md build_reused_md
   local prepare_status solve_status
 
-  run_end_epoch="$(date +%s)"
+  run_end_ns="$(now_ns)"
   run_end_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  total_elapsed="$((run_end_epoch - RUN_START_EPOCH))"
-  worker_start_elapsed="$(elapsed_or_null "$WORKER_START_EPOCH" "$WORKER_READY_EPOCH")"
-  prepare_elapsed="$(elapsed_or_null "$PREPARE_ENQUEUE_EPOCH" "$PREPARE_DONE_EPOCH")"
-  solve_elapsed="$(elapsed_or_null "$SOLVE_ENQUEUE_EPOCH" "$SOLVE_DONE_EPOCH")"
+  total_elapsed="$(elapsed_or_null "$RUN_START_NS" "$run_end_ns")"
+  worker_start_elapsed="$(elapsed_or_null "$WORKER_START_NS" "$WORKER_READY_NS")"
+  prepare_elapsed="$(elapsed_or_null "$PREPARE_ENQUEUE_NS" "$PREPARE_DONE_NS")"
+  solve_elapsed="$(elapsed_or_null "$SOLVE_ENQUEUE_NS" "$SOLVE_DONE_NS")"
 
   if [ "$exit_code" -eq 0 ]; then
     run_status="completed"
@@ -375,10 +439,12 @@ write_run_report() {
   prepare_status="not_started"
   solve_status="not_started"
   if [ -n "$PREPARE_JOB_ID" ]; then
-    prepare_status="$(sql_scalar "SELECT COALESCE(status, 'missing') FROM public.lca_jobs WHERE id = '$PREPARE_JOB_ID'::uuid;" 2>/dev/null || echo unknown)"
+    load_job_timing_from_db "$PREPARE_JOB_ID" "PREPARE_DB"
+    prepare_status="${PREPARE_DB_STATUS:-unknown}"
   fi
   if [ -n "$SOLVE_JOB_ID" ]; then
-    solve_status="$(sql_scalar "SELECT COALESCE(status, 'missing') FROM public.lca_jobs WHERE id = '$SOLVE_JOB_ID'::uuid;" 2>/dev/null || echo unknown)"
+    load_job_timing_from_db "$SOLVE_JOB_ID" "SOLVE_DB"
+    solve_status="${SOLVE_DB_STATUS:-unknown}"
   fi
 
   build_snapshot_json="null"
@@ -426,6 +492,18 @@ write_run_report() {
     "prepare_job": $prepare_elapsed,
     "solve_job": $solve_elapsed
   },
+  "job_timing_sec": {
+    "prepare": {
+      "queue_wait": $(empty_to_null "$PREPARE_DB_QUEUE_WAIT_SEC"),
+      "run": $(empty_to_null "$PREPARE_DB_RUN_SEC"),
+      "end_to_end": $(empty_to_null "$PREPARE_DB_END_TO_END_SEC")
+    },
+    "solve": {
+      "queue_wait": $(empty_to_null "$SOLVE_DB_QUEUE_WAIT_SEC"),
+      "run": $(empty_to_null "$SOLVE_DB_RUN_SEC"),
+      "end_to_end": $(empty_to_null "$SOLVE_DB_END_TO_END_SEC")
+    }
+  },
   "build": {
     "reused_snapshot": $build_reused_json,
     "report_json": $(if [ -n "$BUILD_REPORT_JSON" ]; then as_json_string "$BUILD_REPORT_JSON"; else printf 'null'; fi)
@@ -433,8 +511,14 @@ write_run_report() {
   "jobs": {
     "prepare_job_id": $(as_json_string "$PREPARE_JOB_ID"),
     "prepare_status": $(as_json_string "$prepare_status"),
+    "prepare_created_utc": $(empty_to_json_string_or_null "$PREPARE_DB_CREATED_UTC"),
+    "prepare_started_utc": $(empty_to_json_string_or_null "$PREPARE_DB_STARTED_UTC"),
+    "prepare_finished_utc": $(empty_to_json_string_or_null "$PREPARE_DB_FINISHED_UTC"),
     "solve_job_id": $(as_json_string "$SOLVE_JOB_ID"),
-    "solve_status": $(as_json_string "$solve_status")
+    "solve_status": $(as_json_string "$solve_status"),
+    "solve_created_utc": $(empty_to_json_string_or_null "$SOLVE_DB_CREATED_UTC"),
+    "solve_started_utc": $(empty_to_json_string_or_null "$SOLVE_DB_STARTED_UTC"),
+    "solve_finished_utc": $(empty_to_json_string_or_null "$SOLVE_DB_FINISHED_UTC")
   },
   "result": {
     "id": $(as_json_string "$RESULT_ID"),
@@ -476,8 +560,14 @@ JSON
 - build_snapshot: \`$build_snapshot_md\`
 - build_and_compute_total: \`$build_plus_compute_md\`
 - worker_startup: \`$worker_start_elapsed\`
-- prepare_job: \`$prepare_elapsed\`
-- solve_job: \`$solve_elapsed\`
+- prepare_job_orchestrator: \`$prepare_elapsed\`
+- solve_job_orchestrator: \`$solve_elapsed\`
+- prepare_job_queue_wait: \`$PREPARE_DB_QUEUE_WAIT_SEC\`
+- prepare_job_run: \`$PREPARE_DB_RUN_SEC\`
+- prepare_job_end_to_end: \`$PREPARE_DB_END_TO_END_SEC\`
+- solve_job_queue_wait: \`$SOLVE_DB_QUEUE_WAIT_SEC\`
+- solve_job_run: \`$SOLVE_DB_RUN_SEC\`
+- solve_job_end_to_end: \`$SOLVE_DB_END_TO_END_SEC\`
 
 ## Build Source
 
@@ -497,8 +587,14 @@ JSON
 
 - prepare_job_id: \`$PREPARE_JOB_ID\`
 - prepare_status: \`$prepare_status\`
+- prepare_created_utc: \`$PREPARE_DB_CREATED_UTC\`
+- prepare_started_utc: \`$PREPARE_DB_STARTED_UTC\`
+- prepare_finished_utc: \`$PREPARE_DB_FINISHED_UTC\`
 - solve_job_id: \`$SOLVE_JOB_ID\`
 - solve_status: \`$solve_status\`
+- solve_created_utc: \`$SOLVE_DB_CREATED_UTC\`
+- solve_started_utc: \`$SOLVE_DB_STARTED_UTC\`
+- solve_finished_utc: \`$SOLVE_DB_FINISHED_UTC\`
 
 ## Result
 
@@ -547,7 +643,7 @@ if worker_needs_build; then
 fi
 
 echo "[info] starting solver-worker in queue mode"
-WORKER_START_EPOCH="$(date +%s)"
+WORKER_START_NS="$(now_ns)"
 (
   export DATABASE_URL="$DB_URL"
   export PGMQ_QUEUE="$QUEUE_NAME"
@@ -565,7 +661,7 @@ if ! kill -0 "$WORKER_PID" >/dev/null 2>&1; then
   tail -n 120 "$WORKER_LOG" >&2 || true
   exit 1
 fi
-WORKER_READY_EPOCH="$(date +%s)"
+WORKER_READY_NS="$(now_ns)"
 echo "[info] worker pid=$WORKER_PID"
 
 enqueue_prepare() {
@@ -687,16 +783,16 @@ PREPARE_JOB_ID="$(gen_uuid)"
 SOLVE_JOB_ID="$(gen_uuid)"
 
 echo "[info] enqueue prepare job: $PREPARE_JOB_ID"
-PREPARE_ENQUEUE_EPOCH="$(date +%s)"
+PREPARE_ENQUEUE_NS="$(now_ns)"
 enqueue_prepare "$PREPARE_JOB_ID"
 poll_job "$PREPARE_JOB_ID" "prepare_factorization"
-PREPARE_DONE_EPOCH="$(date +%s)"
+PREPARE_DONE_NS="$(now_ns)"
 
 echo "[info] enqueue solve job: $SOLVE_JOB_ID (demand_process_idx=$DEMAND_PROCESS_IDX)"
-SOLVE_ENQUEUE_EPOCH="$(date +%s)"
+SOLVE_ENQUEUE_NS="$(now_ns)"
 enqueue_solve "$SOLVE_JOB_ID"
 poll_job "$SOLVE_JOB_ID" "solve_one"
-SOLVE_DONE_EPOCH="$(date +%s)"
+SOLVE_DONE_NS="$(now_ns)"
 
 IFS='|' read -r RESULT_ID RESULT_ARTIFACT_FORMAT RESULT_ARTIFACT_SIZE RESULT_ARTIFACT_URL RESULT_HAS_INLINE_PAYLOAD RESULT_PERSIST_MODE_APPLIED RESULT_COMPARABLE_COMPUTE_SEC RESULT_PERSIST_ENCODE_SEC RESULT_PERSIST_UPLOAD_SEC RESULT_PERSIST_DB_WRITE_SEC RESULT_PERSIST_TOTAL_SEC < <(
   sql_scalar "

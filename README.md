@@ -193,6 +193,9 @@ make check
 - 报表默认写到 `reports/full-run/`，包含：
   - `run-<ts>.json`（结构化结果 + 阶段耗时 + `result.compute_timing_sec` + `result.persistence_timing_sec`）
   - `run-<ts>.md`（便于人工查看）
+- 计时精度：
+  - 本地编排计时为纳秒采样、秒小数输出（6 位）
+  - 同时写入数据库作业计时 `job_timing_sec`（`queue_wait/run/end_to_end`）
 - 若不传 `--snapshot-id`，会自动选最新 snapshot。
 - 脚本会优先读取 `lca_snapshot_artifacts` 的矩阵规模；若不存在则回退读取旧 `lca_*_entries`。
 - `--result-persist-mode` 支持：

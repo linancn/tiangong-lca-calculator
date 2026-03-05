@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use serde_json::Value;
 use solver_core::{
     ModelSparseData, NumericOptions, PrepareResult, SolveBatchResult, SolveComputationTiming,
@@ -178,8 +180,8 @@ async fn insert_result(
     job_id: Uuid,
     snapshot_id: Uuid,
     data: ResultInsert,
-) -> anyhow::Result<()> {
-    let _ = sqlx::query(
+) -> anyhow::Result<Uuid> {
+    let row = sqlx::query(
         r"
         INSERT INTO lca_results (
             job_id,
@@ -193,6 +195,7 @@ async fn insert_result(
             created_at
         )
         VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7, $8, NOW())
+        RETURNING id
         ",
     )
     .bind(job_id)
@@ -203,6 +206,26 @@ async fn insert_result(
     .bind(data.artifact_sha256)
     .bind(data.artifact_byte_size)
     .bind(data.artifact_format)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get::<Uuid, _>("id")?)
+}
+
+#[instrument(skip(pool, diagnostics))]
+async fn update_result_diagnostics(
+    pool: &PgPool,
+    result_id: Uuid,
+    diagnostics: Value,
+) -> anyhow::Result<()> {
+    let _ = sqlx::query(
+        r"
+        UPDATE lca_results
+        SET diagnostics = $2::jsonb
+        WHERE id = $1
+        ",
+    )
+    .bind(result_id)
+    .bind(diagnostics)
     .execute(pool)
     .await?;
     Ok(())
@@ -542,17 +565,22 @@ async fn persist_solve_one_result(
     timing: &SolveComputationTiming,
 ) -> anyhow::Result<Value> {
     let payload_json = serde_json::to_value(solved)?;
+    let encode_started = Instant::now();
     let encoded = encode_solve_one_artifact(snapshot_id, job_id, solved)?;
+    let encode_artifact_sec = encode_started.elapsed().as_secs_f64();
     let timing_json = serde_json::to_value(timing)?;
 
     persist_result_payload(
         state,
         job_id,
         snapshot_id,
-        "solve_one",
-        payload_json,
-        encoded,
-        Some(timing_json),
+        PersistPayloadInput {
+            suffix: "solve_one",
+            payload_json,
+            encoded,
+            compute_timing: Some(timing_json),
+            encode_artifact_sec,
+        },
     )
     .await
 }
@@ -564,102 +592,246 @@ async fn persist_solve_batch_result(
     solved: &SolveBatchResult,
 ) -> anyhow::Result<Value> {
     let payload_json = serde_json::to_value(solved)?;
+    let encode_started = Instant::now();
     let encoded = encode_solve_batch_artifact(snapshot_id, job_id, solved)?;
+    let encode_artifact_sec = encode_started.elapsed().as_secs_f64();
 
     persist_result_payload(
         state,
         job_id,
         snapshot_id,
-        "solve_batch",
-        payload_json,
-        encoded,
-        None,
+        PersistPayloadInput {
+            suffix: "solve_batch",
+            payload_json,
+            encoded,
+            compute_timing: None,
+            encode_artifact_sec,
+        },
     )
     .await
+}
+
+struct PersistPayloadInput {
+    suffix: &'static str,
+    payload_json: Value,
+    encoded: EncodedArtifact,
+    compute_timing: Option<Value>,
+    encode_artifact_sec: f64,
+}
+
+struct ArtifactMeta {
+    format: String,
+    sha256: String,
+    encoded_len: usize,
+    artifact_len: Option<i64>,
+}
+
+#[derive(Clone)]
+struct PersistTimingContext {
+    compute_timing: Option<Value>,
+    encode_artifact_sec: f64,
+    upload_artifact_sec: Option<f64>,
 }
 
 async fn persist_result_payload(
     state: &AppState,
     job_id: Uuid,
     snapshot_id: Uuid,
-    suffix: &str,
-    payload_json: Value,
-    encoded: EncodedArtifact,
-    compute_timing: Option<Value>,
+    input: PersistPayloadInput,
 ) -> anyhow::Result<Value> {
-    let encoded_len = encoded.bytes.len();
-    let artifact_len = i64::try_from(encoded_len).ok();
+    let PersistPayloadInput {
+        suffix,
+        payload_json,
+        encoded,
+        compute_timing,
+        encode_artifact_sec,
+    } = input;
+    let EncodedArtifact {
+        format,
+        extension,
+        content_type,
+        sha256,
+        bytes,
+    } = encoded;
+    let encoded_len = bytes.len();
+    let artifact_meta = ArtifactMeta {
+        format: format.to_owned(),
+        sha256,
+        encoded_len,
+        artifact_len: i64::try_from(encoded_len).ok(),
+    };
+    let mut timing = PersistTimingContext {
+        compute_timing,
+        encode_artifact_sec,
+        upload_artifact_sec: None,
+    };
 
     if encoded_len > state.result_inline_max_bytes
         && let Some(object_store) = &state.object_store
     {
+        let upload_started = Instant::now();
         match object_store
-            .upload_result(
-                snapshot_id,
-                job_id,
-                suffix,
-                encoded.extension,
-                encoded.content_type,
-                encoded.bytes,
-            )
+            .upload_result(snapshot_id, job_id, suffix, extension, content_type, bytes)
             .await
         {
             Ok(url) => {
-                let diagnostics = serde_json::json!({
-                    "storage": "object_storage",
-                    "artifact_format": encoded.format,
-                    "artifact_sha256": encoded.sha256,
-                    "artifact_bytes": encoded_len,
-                    "artifact_url": url,
-                    "compute_timing_sec": compute_timing.clone(),
-                });
-
-                insert_result(
-                    &state.pool,
+                timing.upload_artifact_sec = Some(upload_started.elapsed().as_secs_f64());
+                return persist_object_storage_result(
+                    state,
                     job_id,
                     snapshot_id,
-                    ResultInsert {
-                        payload: None,
-                        diagnostics: diagnostics.clone(),
-                        artifact_url: Some(url),
-                        artifact_sha256: Some(encoded.sha256),
-                        artifact_byte_size: artifact_len,
-                        artifact_format: Some(encoded.format.to_owned()),
-                    },
+                    &artifact_meta,
+                    &timing,
+                    &url,
                 )
-                .await?;
-
-                return Ok(diagnostics);
+                .await;
             }
             Err(err) => {
+                timing.upload_artifact_sec = Some(upload_started.elapsed().as_secs_f64());
                 warn!(error = %err, "artifact upload failed; falling back to inline payload storage");
             }
         }
     }
 
-    let diagnostics = serde_json::json!({
-        "storage": "inline_json",
-        "artifact_format": encoded.format,
-        "encoded_bytes": encoded_len,
-        "compute_timing_sec": compute_timing,
+    persist_inline_result(
+        state,
+        job_id,
+        snapshot_id,
+        payload_json,
+        &artifact_meta,
+        &timing,
+    )
+    .await
+}
+
+async fn persist_object_storage_result(
+    state: &AppState,
+    job_id: Uuid,
+    snapshot_id: Uuid,
+    artifact_meta: &ArtifactMeta,
+    timing: &PersistTimingContext,
+    artifact_url: &str,
+) -> anyhow::Result<Value> {
+    let diagnostics_without_db_write = serde_json::json!({
+        "storage": "object_storage",
+        "artifact_format": artifact_meta.format,
+        "artifact_sha256": artifact_meta.sha256,
+        "artifact_bytes": artifact_meta.encoded_len,
+        "artifact_url": artifact_url,
+        "compute_timing_sec": timing.compute_timing,
+        "persistence_timing_sec": persistence_timing_json(
+            timing.encode_artifact_sec,
+            timing.upload_artifact_sec,
+            None,
+        ),
     });
 
-    insert_result(
+    let db_write_started = Instant::now();
+    let result_id = insert_result(
+        &state.pool,
+        job_id,
+        snapshot_id,
+        ResultInsert {
+            payload: None,
+            diagnostics: diagnostics_without_db_write.clone(),
+            artifact_url: Some(artifact_url.to_owned()),
+            artifact_sha256: Some(artifact_meta.sha256.clone()),
+            artifact_byte_size: artifact_meta.artifact_len,
+            artifact_format: Some(artifact_meta.format.clone()),
+        },
+    )
+    .await?;
+    let db_write_sec = db_write_started.elapsed().as_secs_f64();
+
+    let diagnostics = serde_json::json!({
+        "storage": "object_storage",
+        "artifact_format": artifact_meta.format,
+        "artifact_sha256": artifact_meta.sha256,
+        "artifact_bytes": artifact_meta.encoded_len,
+        "artifact_url": artifact_url,
+        "compute_timing_sec": timing.compute_timing,
+        "persistence_timing_sec": persistence_timing_json(
+            timing.encode_artifact_sec,
+            timing.upload_artifact_sec,
+            Some(db_write_sec),
+        ),
+    });
+    if diagnostics != diagnostics_without_db_write {
+        update_result_diagnostics(&state.pool, result_id, diagnostics.clone()).await?;
+    }
+
+    Ok(diagnostics)
+}
+
+async fn persist_inline_result(
+    state: &AppState,
+    job_id: Uuid,
+    snapshot_id: Uuid,
+    payload_json: Value,
+    artifact_meta: &ArtifactMeta,
+    timing: &PersistTimingContext,
+) -> anyhow::Result<Value> {
+    let upload_failed_fallback_inline = timing.upload_artifact_sec.is_some();
+    let diagnostics_without_db_write = serde_json::json!({
+        "storage": "inline_json",
+        "artifact_format": artifact_meta.format,
+        "encoded_bytes": artifact_meta.encoded_len,
+        "compute_timing_sec": timing.compute_timing,
+        "upload_failed_fallback_inline": upload_failed_fallback_inline,
+        "persistence_timing_sec": persistence_timing_json(
+            timing.encode_artifact_sec,
+            timing.upload_artifact_sec,
+            None,
+        ),
+    });
+
+    let db_write_started = Instant::now();
+    let result_id = insert_result(
         &state.pool,
         job_id,
         snapshot_id,
         ResultInsert {
             payload: Some(payload_json),
-            diagnostics: diagnostics.clone(),
+            diagnostics: diagnostics_without_db_write.clone(),
             artifact_url: None,
             artifact_sha256: None,
             artifact_byte_size: None,
-            artifact_format: Some(encoded.format.to_owned()),
+            artifact_format: Some(artifact_meta.format.clone()),
         },
     )
     .await?;
+    let db_write_sec = db_write_started.elapsed().as_secs_f64();
+    let diagnostics = serde_json::json!({
+        "storage": "inline_json",
+        "artifact_format": artifact_meta.format,
+        "encoded_bytes": artifact_meta.encoded_len,
+        "compute_timing_sec": timing.compute_timing,
+        "upload_failed_fallback_inline": upload_failed_fallback_inline,
+        "persistence_timing_sec": persistence_timing_json(
+            timing.encode_artifact_sec,
+            timing.upload_artifact_sec,
+            Some(db_write_sec),
+        ),
+    });
+    if diagnostics != diagnostics_without_db_write {
+        update_result_diagnostics(&state.pool, result_id, diagnostics.clone()).await?;
+    }
 
     Ok(diagnostics)
+}
+
+fn persistence_timing_json(
+    encode_artifact_sec: f64,
+    upload_artifact_sec: Option<f64>,
+    db_write_sec: Option<f64>,
+) -> Value {
+    let db_write = db_write_sec.unwrap_or(0.0);
+    serde_json::json!({
+        "encode_artifact_sec": encode_artifact_sec,
+        "upload_artifact_sec": upload_artifact_sec,
+        "db_write_sec": db_write_sec,
+        "total_sec": encode_artifact_sec + upload_artifact_sec.unwrap_or(0.0) + db_write,
+    })
 }
 
 fn to_core_solve_options(solve: SolveOptionsPayload) -> SolveOptions {

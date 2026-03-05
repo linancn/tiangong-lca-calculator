@@ -185,7 +185,7 @@ make check
   - `run-<ts>.log`（执行过程）
   - `worker-<ts>.log`（worker 详细日志）
 - 报表默认写到 `reports/full-run/`，包含：
-  - `run-<ts>.json`（结构化结果 + 阶段耗时）
+  - `run-<ts>.json`（结构化结果 + 阶段耗时 + `result.compute_timing_sec` + `result.persistence_timing_sec`）
   - `run-<ts>.md`（便于人工查看）
 - 若不传 `--snapshot-id`，会自动选最新 snapshot。
 - 脚本会优先读取 `lca_snapshot_artifacts` 的矩阵规模；若不存在则回退读取旧 `lca_*_entries`。
@@ -227,6 +227,11 @@ make check
   - Rust：`solve_mx_sec + bx_sec + cg_sec`（来自 `lca_results.diagnostics.compute_timing_sec`）
   - Brightway：`solve_sec` / `build_plus_solve_sec`
   - 同时保留 `rust_job_run_sec`（含持久化与上传）供端到端参考
+- 输出 Rust 持久化拆分耗时（来自 `lca_results.diagnostics.persistence_timing_sec`）：
+  - `encode_artifact_sec`
+  - `upload_artifact_sec`
+  - `db_write_sec`
+  - `total_sec`
 
 性能说明（x64 Linux）：
 

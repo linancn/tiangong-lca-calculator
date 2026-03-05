@@ -148,6 +148,15 @@ is_decimal_number() {
   [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]
 }
 
+json_number_or_null() {
+  local value="$1"
+  if is_decimal_number "$value"; then
+    printf '%s' "$value"
+  else
+    printf 'null'
+  fi
+}
+
 find_latest_snapshot_build_report() {
   find "$ROOT_DIR/reports" -type f -name "${SNAPSHOT_ID}.json" -printf '%T@|%p\n' 2>/dev/null \
     | sort -t'|' -k1,1nr \
@@ -418,7 +427,16 @@ write_run_report() {
     "artifact_format": $(as_json_string "$RESULT_ARTIFACT_FORMAT"),
     "artifact_byte_size": $(if [ -n "$RESULT_ARTIFACT_SIZE" ]; then printf '%s' "$RESULT_ARTIFACT_SIZE"; else printf 'null'; fi),
     "artifact_url": $(if [ -n "$RESULT_ARTIFACT_URL" ]; then as_json_string "$RESULT_ARTIFACT_URL"; else printf 'null'; fi),
-    "has_inline_payload": $(if [ -n "$RESULT_HAS_INLINE_PAYLOAD" ]; then printf '%s' "$RESULT_HAS_INLINE_PAYLOAD"; else printf 'null'; fi)
+    "has_inline_payload": $(if [ -n "$RESULT_HAS_INLINE_PAYLOAD" ]; then printf '%s' "$RESULT_HAS_INLINE_PAYLOAD"; else printf 'null'; fi),
+    "compute_timing_sec": {
+      "comparable_compute_sec": $(json_number_or_null "$RESULT_COMPARABLE_COMPUTE_SEC")
+    },
+    "persistence_timing_sec": {
+      "encode_artifact_sec": $(json_number_or_null "$RESULT_PERSIST_ENCODE_SEC"),
+      "upload_artifact_sec": $(json_number_or_null "$RESULT_PERSIST_UPLOAD_SEC"),
+      "db_write_sec": $(json_number_or_null "$RESULT_PERSIST_DB_WRITE_SEC"),
+      "total_sec": $(json_number_or_null "$RESULT_PERSIST_TOTAL_SEC")
+    }
   },
   "paths": {
     "run_log": $(as_json_string "$RUN_LOG"),
@@ -473,6 +491,11 @@ JSON
 - artifact_byte_size: \`$RESULT_ARTIFACT_SIZE\`
 - artifact_url: \`$RESULT_ARTIFACT_URL\`
 - has_inline_payload: \`$RESULT_HAS_INLINE_PAYLOAD\`
+- comparable_compute_sec: \`$RESULT_COMPARABLE_COMPUTE_SEC\`
+- persistence_encode_artifact_sec: \`$RESULT_PERSIST_ENCODE_SEC\`
+- persistence_upload_artifact_sec: \`$RESULT_PERSIST_UPLOAD_SEC\`
+- persistence_db_write_sec: \`$RESULT_PERSIST_DB_WRITE_SEC\`
+- persistence_total_sec: \`$RESULT_PERSIST_TOTAL_SEC\`
 
 ## Logs
 
@@ -657,14 +680,19 @@ enqueue_solve "$SOLVE_JOB_ID"
 poll_job "$SOLVE_JOB_ID" "solve_one"
 SOLVE_DONE_EPOCH="$(date +%s)"
 
-IFS='|' read -r RESULT_ID RESULT_ARTIFACT_FORMAT RESULT_ARTIFACT_SIZE RESULT_ARTIFACT_URL RESULT_HAS_INLINE_PAYLOAD < <(
+IFS='|' read -r RESULT_ID RESULT_ARTIFACT_FORMAT RESULT_ARTIFACT_SIZE RESULT_ARTIFACT_URL RESULT_HAS_INLINE_PAYLOAD RESULT_COMPARABLE_COMPUTE_SEC RESULT_PERSIST_ENCODE_SEC RESULT_PERSIST_UPLOAD_SEC RESULT_PERSIST_DB_WRITE_SEC RESULT_PERSIST_TOTAL_SEC < <(
   sql_scalar "
   SELECT
     id::text,
     COALESCE(artifact_format, ''),
     COALESCE(artifact_byte_size::text, ''),
     COALESCE(artifact_url, ''),
-    CASE WHEN payload IS NOT NULL THEN 'true' ELSE 'false' END
+    CASE WHEN payload IS NOT NULL THEN 'true' ELSE 'false' END,
+    COALESCE(diagnostics #>> '{compute_timing_sec,comparable_compute_sec}', ''),
+    COALESCE(diagnostics #>> '{persistence_timing_sec,encode_artifact_sec}', ''),
+    COALESCE(diagnostics #>> '{persistence_timing_sec,upload_artifact_sec}', ''),
+    COALESCE(diagnostics #>> '{persistence_timing_sec,db_write_sec}', ''),
+    COALESCE(diagnostics #>> '{persistence_timing_sec,total_sec}', '')
   FROM public.lca_results
   WHERE job_id = '$SOLVE_JOB_ID'::uuid
   ORDER BY created_at DESC

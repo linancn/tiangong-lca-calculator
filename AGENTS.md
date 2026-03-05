@@ -50,6 +50,7 @@ Core invariants:
   - in-memory factorization cache
   - `solve_one` / `solve_batch`
   - timed solve breakdown for `solve_one` (`solve_mx_sec`, `bx_sec`, `cg_sec`, `comparable_compute_sec`)
+  - result persistence timing breakdown (`encode_artifact_sec`, `upload_artifact_sec`, `db_write_sec`, `total_sec`)
 - Worker/API:
   - pgmq queue consume + archive
   - job execution for `prepare_factorization`, `solve_one`, `solve_batch`, `invalidate_factorization`, `rebuild_factorization`
@@ -115,6 +116,9 @@ Hybrid persistence is now active in `solver-worker`:
     - `artifact_format`
 - If upload fails:
   - fallback to inline JSON payload and warn in logs
+- Result diagnostics include:
+  - `compute_timing_sec` for comparable compute lane
+  - `persistence_timing_sec` for result-write split timing
 
 Object storage config keys:
 
@@ -144,6 +148,8 @@ Latest checks passed:
 - `./scripts/run_bw25_validation.sh --report-dir reports/bw25-validation-smoke` (manual smoke, latest solve_one target)
 - `./scripts/run_full_compute_debug.sh --snapshot-id 6201b08a-b125-43a1-b4b8-aacf5a493987` + manual bw25 validation confirms comparable-compute speed lane reporting.
 - `bash -n scripts/cleanup_local_artifacts.sh` (cleanup helper syntax check)
+- `./scripts/run_full_compute_debug.sh --report-dir reports/full-run-persistence-split --log-dir logs/full-run-persistence-split`
+- `./scripts/run_bw25_validation.sh --result-id 1b0a8cdd-2b08-45e4-85a6-43255ae6ecc0 --report-dir reports/bw25-validation-persistence-split`
 
 ### 2.7 Repository hygiene/docs organization (implemented)
 
@@ -194,7 +200,7 @@ Latest checks passed:
 - `scripts/run_full_compute_debug.sh` now writes one run report per execution and reads matrix scale from `lca_snapshot_artifacts` first (fallback to legacy tables):
   - default `reports/full-run/run-<ts>.json`
   - default `reports/full-run/run-<ts>.md`
-  - includes total/worker-start/prepare/solve timing, plus merged `build_snapshot` and `build_and_compute_total`, job ids/status, matrix nnz summary, artifact metadata, log paths.
+  - includes total/worker-start/prepare/solve timing, plus merged `build_snapshot` and `build_and_compute_total`, job ids/status, matrix nnz summary, artifact metadata, result compute/persistence timing split, log paths.
   - auto-discovers latest snapshot coverage report by `snapshot_id` and attaches build source metadata (`reused_snapshot`, `build_report_json`) into full-run report.
 
 ### 2.6 Brightway25 validation path (manual-only)
@@ -214,6 +220,7 @@ Latest checks passed:
   - includes speed comparison in report/log:
     - Rust job timing (`queue_wait_sec`, `run_sec`, `end_to_end_sec`) from `lca_jobs`
     - Rust comparable compute timing from `lca_results.diagnostics.compute_timing_sec`
+    - Rust persistence timing from `lca_results.diagnostics.persistence_timing_sec`
     - Brightway timing (`solve_sec`, `build_plus_solve_sec`)
     - ratio fields and faster-side summary (prefer comparable-compute ratio when available)
 - Validator package/runtime:
@@ -260,6 +267,7 @@ Latest checks passed:
   - updates `lca_jobs`
   - writes `lca_results` payload/metadata
   - stores `solve_one` compute timings in `lca_results.diagnostics.compute_timing_sec`
+  - stores result persistence split timings in `lca_results.diagnostics.persistence_timing_sec`
 - `src/artifacts.rs`:
   - artifact envelope encode (`hdf5:v1`)
   - SHA-256 checksum
@@ -328,7 +336,7 @@ Input source-of-truth upstream remains:
 - Backend is UMFPACK-only; CHOLMOD/SPQR not exposed yet.
 - Brightway validator is manual-only by design and currently validates `solve_one` (not `solve_batch` aggregate logic).
 - Brightway validation assumes snapshot/result artifact schema `v1` (`snapshot-hdf5:v1`, `hdf5:v1`).
-- Current comparable-compute lane captures solver + sparse matvec (`Mx`, `Bx`, `Cg`) but does not yet split persistence I/O into encode/upload/DB sub-stages.
+- Current `persistence_timing_sec.db_write_sec` measures `INSERT lca_results` latency; diagnostics are finalized with a follow-up `UPDATE`, which is not included in `db_write_sec`.
 
 ## 6. TODO backlog (priority)
 
@@ -345,11 +353,11 @@ Input source-of-truth upstream remains:
   - result format `hdf5:v1`
   - snapshot format `snapshot-hdf5:v1`
 - Add CI smoke for `tools/bw25-validator` (fixture snapshot + fixture solve result, threshold assertions).
-- Add `solve_one` persistence sub-timings (`encode_hdf5`, `upload`, `insert_result`) to diagnostics for full end-to-end bottleneck visibility.
 - Strengthen job/result diagnostics schema:
   - factorization stats
   - timing breakdown
   - failure code taxonomy
+- Refine result persistence timing to split `insert_result` vs diagnostics `update_result` overhead in one consistent metric model.
 
 ### P1
 

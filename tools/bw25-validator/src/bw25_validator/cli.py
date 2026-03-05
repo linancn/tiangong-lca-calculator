@@ -84,6 +84,14 @@ class RustComputeTiming:
     comparable_compute_sec: float | None
 
 
+@dataclass
+class RustPersistenceTiming:
+    encode_artifact_sec: float | None
+    upload_artifact_sec: float | None
+    db_write_sec: float | None
+    total_sec: float | None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="bw25-validate",
@@ -134,6 +142,7 @@ def main() -> None:
         resolve_sec = time.perf_counter() - resolve_started
         rust_job_timing = fetch_rust_job_timing(conn, target.job_id)
         rust_compute_timing = extract_rust_compute_timing(target.result_diagnostics)
+        rust_persistence_timing = extract_rust_persistence_timing(target.result_diagnostics)
 
         load_started = time.perf_counter()
         result_payload = load_result_payload(target, s3)
@@ -265,6 +274,12 @@ def main() -> None:
                 "bx_sec": rust_compute_timing.bx_sec,
                 "cg_sec": rust_compute_timing.cg_sec,
                 "comparable_compute_sec": rust_compute_timing.comparable_compute_sec,
+            },
+            "rust_persistence": {
+                "encode_artifact_sec": rust_persistence_timing.encode_artifact_sec,
+                "upload_artifact_sec": rust_persistence_timing.upload_artifact_sec,
+                "db_write_sec": rust_persistence_timing.db_write_sec,
+                "total_sec": rust_persistence_timing.total_sec,
             },
             "brightway": {
                 "build_matrices_sec": build_sec,
@@ -489,6 +504,24 @@ def extract_rust_compute_timing(
         bx_sec=bx_sec,
         cg_sec=cg_sec,
         comparable_compute_sec=comparable_compute_sec,
+    )
+
+
+def extract_rust_persistence_timing(
+    result_diagnostics: dict[str, Any] | None,
+) -> RustPersistenceTiming:
+    if not result_diagnostics:
+        return RustPersistenceTiming(None, None, None, None)
+
+    timing = result_diagnostics.get("persistence_timing_sec")
+    if not isinstance(timing, dict):
+        return RustPersistenceTiming(None, None, None, None)
+
+    return RustPersistenceTiming(
+        encode_artifact_sec=as_optional_float(timing.get("encode_artifact_sec")),
+        upload_artifact_sec=as_optional_float(timing.get("upload_artifact_sec")),
+        db_write_sec=as_optional_float(timing.get("db_write_sec")),
+        total_sec=as_optional_float(timing.get("total_sec")),
     )
 
 
@@ -875,6 +908,10 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             f"- rust_compute_bx_sec: `{speed['rust_compute']['bx_sec']}`",
             f"- rust_compute_cg_sec: `{speed['rust_compute']['cg_sec']}`",
             f"- rust_compute_comparable_sec: `{speed['rust_compute']['comparable_compute_sec']}`",
+            f"- rust_persistence_encode_artifact_sec: `{speed['rust_persistence']['encode_artifact_sec']}`",
+            f"- rust_persistence_upload_artifact_sec: `{speed['rust_persistence']['upload_artifact_sec']}`",
+            f"- rust_persistence_db_write_sec: `{speed['rust_persistence']['db_write_sec']}`",
+            f"- rust_persistence_total_sec: `{speed['rust_persistence']['total_sec']}`",
             f"- brightway_solve_sec: `{speed['brightway']['solve_sec']}`",
             f"- brightway_build_plus_solve_sec: `{speed['brightway']['build_plus_solve_sec']}`",
             f"- rust_run_over_brightway_solve: `{speed['ratios']['rust_run_over_brightway_solve']}`",

@@ -25,12 +25,16 @@ Conclusion:
 
 ### P0 (highest ROI)
 
-1. Split `solve_one` persistence timing in worker diagnostics
+1. Split `solve_one` persistence timing in worker diagnostics (Completed 2026-03-05)
 - Add separate timings for:
   - HDF5 encode
   - object upload
   - DB insert/update
 - Goal: make I/O bottleneck visible per run.
+- Implemented in:
+  - `crates/solver-worker/src/db.rs` (`lca_results.diagnostics.persistence_timing_sec`)
+  - `scripts/run_full_compute_debug.sh` (result timing fields in JSON/MD report)
+  - `tools/bw25-validator/src/bw25_validator/cli.py` (`speed_comparison.rust_persistence`)
 
 2. Add benchmark mode for solve jobs
 - Skip result upload (or force inline payload) when running benchmarking.
@@ -88,4 +92,3 @@ Implement worker-side persistence sub-timings in `lca_results.diagnostics`, then
 - `tools/bw25-validator` to include lane-based comparisons in summary
 
 This gives stable optimization feedback loops without changing solver architecture.
-

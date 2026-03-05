@@ -67,15 +67,21 @@
 - `supabase/migrations/20260304073000_lca_snapshot_phase1.sql`
 - `supabase/migrations/20260304103000_lca_snapshot_artifacts.sql`
 - `supabase/migrations/20260304120000_lca_drop_legacy_entry_tables.sql`（清理旧 `lca_*_entries/index` 表）
+- `supabase/migrations/20260305052000_lca_request_cache_and_factorization_registry.sql`（additive-only：active snapshot + cache + factorization registry + jobs 幂等列）
+- `supabase/migrations/20260305070000_lca_rls_lockdown.sql`（启用 RLS + 收紧 anon/authenticated 权限）
 
 对已有业务源表（`processes/flows/lciamethods/...`）不做修改。
 其中 `20260304120000` 会删除旧的 `lca_*_entries/index` 中间表，只保留 artifact-first 所需表。
+其中 `20260305052000` 只新增缓存/幂等相关结构，运行时主路径暂未强依赖这些新表。
+其中 `20260305070000` 为安全基线：不再允许 `anon` 对 `lca_*` 表读写；`authenticated` 默认只可读取“自己的 jobs/results”。
 
 可先做静态检查：
 
 ```bash
 ./scripts/validate_additive_migration.sh supabase/migrations/20260304073000_lca_snapshot_phase1.sql
 ./scripts/validate_additive_migration.sh supabase/migrations/20260304103000_lca_snapshot_artifacts.sql
+./scripts/validate_additive_migration.sh supabase/migrations/20260305052000_lca_request_cache_and_factorization_registry.sql
+./scripts/validate_additive_migration.sh supabase/migrations/20260305070000_lca_rls_lockdown.sql
 ```
 
 执行迁移：
@@ -85,7 +91,18 @@ set -a && source .env && set +a
 psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260304073000_lca_snapshot_phase1.sql
 psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260304103000_lca_snapshot_artifacts.sql
 psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260304120000_lca_drop_legacy_entry_tables.sql
+psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260305052000_lca_request_cache_and_factorization_registry.sql
+psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260305070000_lca_rls_lockdown.sql
 ```
+
+### 4.0.1 访问控制基线（RLS）
+
+`20260305070000_lca_rls_lockdown.sql` 生效后：
+
+- `lca_*` 表全部启用 RLS。
+- `anon`：无表级权限。
+- `authenticated`：仅可 `SELECT` 自己的 `lca_jobs` 与其关联的 `lca_results`。
+- `service_role`：保留完整权限（供 Edge Functions / worker 使用）。
 
 ### 4.1 构建可计算 snapshot（artifact-first）
 
@@ -283,7 +300,7 @@ cargo run -p solver-worker --release
 ## 9. 说明文档
 
 - 面向 AI 的持续上下文：`AGENTS.md`
-- 架构与建模方案：`LCA_SCHEMA_PLAN.md`
+- 架构与建模方案：`LCA_SCHEMA_UPDATE_PLAN.md`（旧路径 `LCA_SCHEMA_PLAN.md` 为跳转说明）
 - 优化评估与优先级：`OPTIMIZATION_REVIEW.md`
 
 ## 10. 项目文件整理

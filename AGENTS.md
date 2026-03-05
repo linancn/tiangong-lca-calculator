@@ -76,6 +76,8 @@ Applied migrations:
 - `supabase/migrations/20260304073000_lca_snapshot_phase1.sql` (additive)
 - `supabase/migrations/20260304103000_lca_snapshot_artifacts.sql` (additive)
 - `supabase/migrations/20260304120000_lca_drop_legacy_entry_tables.sql` (cleanup drop)
+- `supabase/migrations/20260305052000_lca_request_cache_and_factorization_registry.sql` (additive)
+- `supabase/migrations/20260305070000_lca_rls_lockdown.sql` (security additive)
 
 Created tables:
 
@@ -83,6 +85,14 @@ Created tables:
 - `lca_snapshot_artifacts`
 - `lca_jobs`
 - `lca_results`
+- `lca_active_snapshots`
+- `lca_result_cache`
+- `lca_factorization_registry`
+
+Additive columns on existing table:
+
+- `lca_jobs.request_key`
+- `lca_jobs.idempotency_key`
 
 Legacy phase1 matrix/index tables are removed by cleanup migration:
 
@@ -100,6 +110,8 @@ Verification done at migration time:
 
 - Existing source tables row counts unchanged (`processes`, `flows`, `lciamethods`, `lifecyclemodels`).
 - Cleanup migration only touches legacy `lca_*` intermediate tables.
+- Additive migration `20260305052000` only creates `lca_*` tables/indexes and adds nullable columns to `lca_jobs`.
+- Security migration `20260305070000` enables RLS on `lca_*` runtime tables and revokes broad `anon/authenticated` grants.
 
 ### 2.3 Result storage policy (implemented)
 
@@ -152,6 +164,10 @@ Latest checks passed:
 - `cargo fmt --all`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
+- `./scripts/validate_additive_migration.sh supabase/migrations/20260305052000_lca_request_cache_and_factorization_registry.sql`
+- `psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260305052000_lca_request_cache_and_factorization_registry.sql`
+- `./scripts/validate_additive_migration.sh supabase/migrations/20260305070000_lca_rls_lockdown.sql`
+- `psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260305070000_lca_rls_lockdown.sql`
 - `python3 -m py_compile tools/bw25-validator/src/bw25_validator/cli.py`
 - `uv run --project tools/bw25-validator python -c "import pypardiso"` (Linux x86_64)
 - `./scripts/run_bw25_validation.sh --report-dir reports/bw25-validation-smoke` (manual smoke, latest solve_one target)
@@ -173,6 +189,9 @@ Latest checks passed:
 
 - Added optimization assessment doc:
   - `OPTIMIZATION_REVIEW.md`
+- Schema documentation is now split as:
+  - `LCA_SCHEMA_UPDATE_PLAN.md` (authoritative additive-only schema update plan)
+  - `LCA_SCHEMA_PLAN.md` (compatibility redirect note)
 - Added local artifact cleanup helper:
   - `scripts/cleanup_local_artifacts.sh`
   - supports `--dry-run`, `--with-target`
@@ -341,6 +360,21 @@ Current runtime primary path expects:
 - `lca_jobs`
 - `lca_results`
 
+Additive schema now also provides (for next integration stage):
+
+- `lca_active_snapshots`
+- `lca_result_cache`
+- `lca_factorization_registry`
+
+RLS baseline:
+
+- `lca_*` tables have RLS enabled.
+- `anon` has no table privileges on `lca_*`.
+- `authenticated` can `SELECT` only own rows in `lca_jobs`/`lca_results` via policies:
+  - `lca_jobs_select_own`
+  - `lca_results_select_own`
+- internal write paths are expected to use `service_role`.
+
 `lca_network_snapshots.source_hash` is used as source fingerprint key for skip-rebuild matching.
 
 Legacy fallback path in code exists for compatibility, but current DB may not have those tables after cleanup migration.
@@ -371,6 +405,7 @@ Input source-of-truth upstream remains:
 - Current `persistence_timing_sec.db_write_sec` measures `INSERT lca_results` latency; diagnostics are finalized with a follow-up `UPDATE`, which is not included in `db_write_sec`.
 - `inline-only` benchmark mode still writes full JSON payload to `lca_results`; for very large vectors this can increase DB row size/IO.
 - `timing_sec.prepare_job/solve_job` are orchestrator wall-clock spans and intentionally differ from DB `job_timing_sec.*` (which isolates queue wait/run/end-to-end from DB timestamps).
+- Newly added tables (`lca_active_snapshots/lca_result_cache/lca_factorization_registry`) are not yet wired into worker runtime or Edge Functions; current request path still relies on direct `lca_jobs` enqueue.
 
 ## 6. TODO backlog (priority)
 

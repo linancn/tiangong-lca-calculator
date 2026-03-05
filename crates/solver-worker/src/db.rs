@@ -567,9 +567,9 @@ async fn persist_solve_one_result(
     solved: &SolveResult,
     timing: &SolveComputationTiming,
 ) -> anyhow::Result<Value> {
-    let payload_json = serde_json::to_value(solved)?;
     let timing_json = serde_json::to_value(timing)?;
     if state.result_persist_mode == ResultPersistMode::InlineOnly {
+        let payload_json = serde_json::to_value(solved)?;
         return persist_inline_only_result(
             state,
             job_id,
@@ -590,11 +590,11 @@ async fn persist_solve_one_result(
         snapshot_id,
         PersistPayloadInput {
             suffix: "solve_one",
-            payload_json,
             encoded,
             compute_timing: Some(timing_json),
             encode_artifact_sec,
         },
+        || -> anyhow::Result<Value> { Ok(serde_json::to_value(solved)?) },
     )
     .await
 }
@@ -605,8 +605,8 @@ async fn persist_solve_batch_result(
     snapshot_id: Uuid,
     solved: &SolveBatchResult,
 ) -> anyhow::Result<Value> {
-    let payload_json = serde_json::to_value(solved)?;
     if state.result_persist_mode == ResultPersistMode::InlineOnly {
+        let payload_json = serde_json::to_value(solved)?;
         return persist_inline_only_result(state, job_id, snapshot_id, payload_json, None).await;
     }
 
@@ -620,18 +620,17 @@ async fn persist_solve_batch_result(
         snapshot_id,
         PersistPayloadInput {
             suffix: "solve_batch",
-            payload_json,
             encoded,
             compute_timing: None,
             encode_artifact_sec,
         },
+        || -> anyhow::Result<Value> { Ok(serde_json::to_value(solved)?) },
     )
     .await
 }
 
 struct PersistPayloadInput {
     suffix: &'static str,
-    payload_json: Value,
     encoded: EncodedArtifact,
     compute_timing: Option<Value>,
     encode_artifact_sec: f64,
@@ -656,10 +655,10 @@ async fn persist_result_payload(
     job_id: Uuid,
     snapshot_id: Uuid,
     input: PersistPayloadInput,
+    payload_json_builder: impl FnOnce() -> anyhow::Result<Value>,
 ) -> anyhow::Result<Value> {
     let PersistPayloadInput {
         suffix,
-        payload_json,
         encoded,
         compute_timing,
         encode_artifact_sec,
@@ -683,6 +682,7 @@ async fn persist_result_payload(
         encode_artifact_sec,
         upload_artifact_sec: None,
     };
+    let mut payload_json_builder = Some(payload_json_builder);
 
     if encoded_len > state.result_inline_max_bytes
         && let Some(object_store) = &state.object_store
@@ -710,6 +710,11 @@ async fn persist_result_payload(
             }
         }
     }
+
+    let payload_json = payload_json_builder
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing payload JSON builder for inline fallback"))?(
+    )?;
 
     persist_inline_result(
         state,

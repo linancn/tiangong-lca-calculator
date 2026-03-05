@@ -55,9 +55,12 @@ Conclusion:
 
 ### P1
 
-4. Avoid unnecessary payload serialization
+4. Avoid unnecessary payload serialization (Completed 2026-03-05)
 - If `return_x/g/h` options disable fields, avoid building and serializing unused vectors.
 - Goal: reduce CPU and payload bytes.
+- Implemented in:
+  - `crates/solver-core/src/service.rs` (`solve_one_timed` output assembly avoids eager default evaluation)
+  - `crates/solver-worker/src/db.rs` (normal mode result JSON serialization is lazy and only executed on inline path)
 
 5. Add queue and DB latency telemetry
 - Track time from enqueue to worker pickup, and DB write latency.
@@ -94,9 +97,10 @@ Do not mix lanes when declaring “who is faster”.
 
 ## 4. Suggested next implementation step
 
-Implement worker-side persistence sub-timings in `lca_results.diagnostics`, then extend:
+Implement queue/DB latency telemetry and expose it in reports as first-class fields:
 
-- `scripts/run_full_compute_debug.sh` to show these fields
-- `tools/bw25-validator` to include lane-based comparisons in summary
+- queue backlog and dequeue latency by interval
+- DB write latency breakdown for `lca_jobs` vs `lca_results`
+- basic percentiles in report summaries
 
-This gives stable optimization feedback loops without changing solver architecture.
+This will make throughput regressions easier to locate during larger-scale runs.

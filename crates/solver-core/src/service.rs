@@ -281,9 +281,16 @@ impl SolverService {
             None
         };
 
+        let x_out = if solve_options.return_x {
+            Some(x)
+        } else {
+            None
+        };
+        let g_out = if solve_options.return_g { g } else { None };
+
         let result = SolveResult {
-            x: solve_options.return_x.then_some(x),
-            g: solve_options.return_g.then_some(g.unwrap_or_default()),
+            x: x_out,
+            g: g_out,
             h,
             factorization_state: FactorizationState::Ready,
         };
@@ -434,5 +441,68 @@ mod tests {
 
         let count = service.invalidate(model_version);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn solve_options_skip_unrequested_vectors() {
+        let model_version = Uuid::new_v4();
+        let data = ModelSparseData {
+            model_version,
+            process_count: 2,
+            flow_count: 1,
+            impact_count: 1,
+            technosphere_entries: vec![
+                SparseTriplet {
+                    row: 0,
+                    col: 1,
+                    value: 0.5,
+                },
+                SparseTriplet {
+                    row: 1,
+                    col: 0,
+                    value: 0.25,
+                },
+            ],
+            biosphere_entries: vec![
+                SparseTriplet {
+                    row: 0,
+                    col: 0,
+                    value: 2.0,
+                },
+                SparseTriplet {
+                    row: 0,
+                    col: 1,
+                    value: 3.0,
+                },
+            ],
+            characterization_factors: vec![SparseTriplet {
+                row: 0,
+                col: 0,
+                value: 0.1,
+            }],
+        };
+
+        let service = SolverService::new();
+        service
+            .prepare(&data, NumericOptions::default())
+            .expect("prepare factorization");
+
+        let solved = service
+            .solve_one(
+                model_version,
+                NumericOptions::default(),
+                &[1.0, 2.0],
+                SolveOptions {
+                    return_x: false,
+                    return_g: false,
+                    return_h: true,
+                },
+            )
+            .expect("solve");
+
+        assert!(solved.x.is_none());
+        assert!(solved.g.is_none());
+        let h = solved.h.expect("h");
+        assert_relative_eq!(h[0], 1.228_571_428_57, epsilon = 1e-9);
     }
 }

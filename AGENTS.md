@@ -52,6 +52,8 @@ Core invariants:
   - timed solve breakdown for `solve_one` (`solve_mx_sec`, `bx_sec`, `cg_sec`, `comparable_compute_sec`)
   - result persistence timing breakdown (`encode_artifact_sec`, `upload_artifact_sec`, `db_write_sec`, `total_sec`)
   - benchmark persist mode switch (`normal` / `inline-only`)
+  - solve output assembly avoids eager evaluation for unrequested vectors (`return_x/return_g/return_h`)
+  - normal persist path uses lazy JSON serialization (serialize only when inline path is actually used)
 - Worker/API:
   - pgmq queue consume + archive
   - job execution for `prepare_factorization`, `solve_one`, `solve_batch`, `invalidate_factorization`, `rebuild_factorization`
@@ -158,6 +160,8 @@ Latest checks passed:
 - `./scripts/run_bw25_validation.sh --result-id 3c06c0c4-c846-46dc-b8f8-d9343aff15ce --report-dir reports/bw25-validation-inline-only`
 - `./scripts/run_full_compute_debug.sh --result-persist-mode inline-only --report-dir reports/full-run-ms-precision --log-dir logs/full-run-ms-precision`
 - `./scripts/run_bw25_validation.sh --result-id 50f6f0c2-863a-49df-ba63-383ac77d51e7 --report-dir reports/bw25-validation-ms-precision`
+- `./scripts/run_full_compute_debug.sh --result-persist-mode inline-only --report-dir reports/full-run-step4 --log-dir logs/full-run-step4`
+- `./scripts/run_bw25_validation.sh --result-id 18157632-551e-457b-98df-4a420faacc18 --report-dir reports/bw25-validation-step4`
 
 ### 2.7 Repository hygiene/docs organization (implemented)
 
@@ -266,6 +270,7 @@ Latest checks passed:
 - `src/cache.rs`: in-memory factorization cache/state
 - `src/service.rs`: `prepare/solve/invalidate` orchestration
   - provides timed solve API for comparable compute benchmarking
+  - no eager default-vector construction for unrequested `g` output
 
 ### 3.3 `crates/solver-worker`
 
@@ -282,6 +287,7 @@ Latest checks passed:
   - stores `solve_one` compute timings in `lca_results.diagnostics.compute_timing_sec`
   - stores result persistence split timings in `lca_results.diagnostics.persistence_timing_sec`
   - supports benchmark persist mode `inline-only` (skip encode/upload)
+  - delays `serde_json::to_value(...)` for normal mode until inline path is required (small result or upload fallback)
 - `src/artifacts.rs`:
   - artifact envelope encode (`hdf5:v1`)
   - SHA-256 checksum

@@ -223,6 +223,10 @@ make check
 - Brightway 重建 `M` 并求 `x`
 - 对比 Rust 的 `x/g/h`
 - 记录残差与阈值判断（`atol/rtol`）
+- 输出速度对比（优先比较“可比计算时间”）：
+  - Rust：`solve_mx_sec + bx_sec + cg_sec`（来自 `lca_results.diagnostics.compute_timing_sec`）
+  - Brightway：`solve_sec` / `build_plus_solve_sec`
+  - 同时保留 `rust_job_run_sec`（含持久化与上传）供端到端参考
 
 性能说明（x64 Linux）：
 

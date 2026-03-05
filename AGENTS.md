@@ -49,6 +49,7 @@ Core invariants:
   - structure validation
   - in-memory factorization cache
   - `solve_one` / `solve_batch`
+  - timed solve breakdown for `solve_one` (`solve_mx_sec`, `bx_sec`, `cg_sec`, `comparable_compute_sec`)
 - Worker/API:
   - pgmq queue consume + archive
   - job execution for `prepare_factorization`, `solve_one`, `solve_batch`, `invalidate_factorization`, `rebuild_factorization`
@@ -197,6 +198,11 @@ Latest checks passed:
   - compares Rust vs Brightway vectors (`x/g/h`) and writes report:
     - `reports/bw25-validation/<result_id>.json`
     - `reports/bw25-validation/<result_id>.md`
+  - includes speed comparison in report/log:
+    - Rust job timing (`queue_wait_sec`, `run_sec`, `end_to_end_sec`) from `lca_jobs`
+    - Rust comparable compute timing from `lca_results.diagnostics.compute_timing_sec`
+    - Brightway timing (`solve_sec`, `build_plus_solve_sec`)
+    - ratio fields and faster-side summary (prefer comparable-compute ratio when available)
 - Validator package/runtime:
   - `brightway25==1.1.1` (PyPI latest as of 2026-03-04)
   - `bw2calc`, `bw_processing`, `numpy`, `scipy`, `h5py`, `psycopg`, `boto3`, `requests`
@@ -222,6 +228,7 @@ Latest checks passed:
 - `src/validator.rs`: pre-factorization checks/warnings
 - `src/cache.rs`: in-memory factorization cache/state
 - `src/service.rs`: `prepare/solve/invalidate` orchestration
+  - provides timed solve API for comparable compute benchmarking
 
 ### 3.3 `crates/solver-worker`
 
@@ -234,6 +241,7 @@ Latest checks passed:
   - fallback reads from legacy `lca_*` entry tables
   - updates `lca_jobs`
   - writes `lca_results` payload/metadata
+  - stores `solve_one` compute timings in `lca_results.diagnostics.compute_timing_sec`
 - `src/artifacts.rs`:
   - artifact envelope encode (`hdf5:v1`)
   - SHA-256 checksum

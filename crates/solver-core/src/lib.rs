@@ -8,7 +8,8 @@ mod validator;
 pub use cache::{FactorizationCache, FactorizationKey, FactorizationState, SolverBackend};
 pub use data_builder::{DataBuilder, ModelSparseData, SparseTriplet};
 pub use service::{
-    FactorizationDiagnostics, NumericOptions, PrepareResult, SolveBatchResult, SolveOptions,
-    SolveResult, SolverError, SolverService,
+    FactorizationDiagnostics, NumericOptions, PrepareResult, SolveBatchResult,
+    SolveComputationTiming, SolveOptions, SolveResult, SolverError, SolverService,
+    TimedSolveResult,
 };
 pub use validator::{MatrixStats, ValidationReport, ValidationStatus};

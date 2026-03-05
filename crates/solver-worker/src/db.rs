@@ -1,7 +1,7 @@
 use serde_json::Value;
 use solver_core::{
-    ModelSparseData, NumericOptions, PrepareResult, SolveBatchResult, SolveOptions, SolveResult,
-    SolverService, SparseTriplet,
+    ModelSparseData, NumericOptions, PrepareResult, SolveBatchResult, SolveComputationTiming,
+    SolveOptions, SolveResult, SolverService, SparseTriplet,
 };
 use sqlx::{PgPool, Row};
 use tracing::{instrument, warn};
@@ -423,14 +423,17 @@ pub async fn handle_job_payload(state: &AppState, payload: JobPayload) -> anyhow
 
             let level = print_level.unwrap_or(0.0);
             ensure_prepared(state, snapshot_id, level).await?;
-            let solved = state.solver.solve_one(
+            let timed = state.solver.solve_one_timed(
                 snapshot_id,
                 NumericOptions { print_level: level },
                 &rhs,
                 to_core_solve_options(solve),
             )?;
+            let solved = timed.result;
 
-            let result_diag = persist_solve_one_result(state, job_id, snapshot_id, &solved).await?;
+            let result_diag =
+                persist_solve_one_result(state, job_id, snapshot_id, &solved, &timed.timing)
+                    .await?;
             update_job_status(
                 &state.pool,
                 job_id,
@@ -536,9 +539,11 @@ async fn persist_solve_one_result(
     job_id: Uuid,
     snapshot_id: Uuid,
     solved: &SolveResult,
+    timing: &SolveComputationTiming,
 ) -> anyhow::Result<Value> {
     let payload_json = serde_json::to_value(solved)?;
     let encoded = encode_solve_one_artifact(snapshot_id, job_id, solved)?;
+    let timing_json = serde_json::to_value(timing)?;
 
     persist_result_payload(
         state,
@@ -547,6 +552,7 @@ async fn persist_solve_one_result(
         "solve_one",
         payload_json,
         encoded,
+        Some(timing_json),
     )
     .await
 }
@@ -567,6 +573,7 @@ async fn persist_solve_batch_result(
         "solve_batch",
         payload_json,
         encoded,
+        None,
     )
     .await
 }
@@ -578,6 +585,7 @@ async fn persist_result_payload(
     suffix: &str,
     payload_json: Value,
     encoded: EncodedArtifact,
+    compute_timing: Option<Value>,
 ) -> anyhow::Result<Value> {
     let encoded_len = encoded.bytes.len();
     let artifact_len = i64::try_from(encoded_len).ok();
@@ -603,6 +611,7 @@ async fn persist_result_payload(
                     "artifact_sha256": encoded.sha256,
                     "artifact_bytes": encoded_len,
                     "artifact_url": url,
+                    "compute_timing_sec": compute_timing.clone(),
                 });
 
                 insert_result(
@@ -632,6 +641,7 @@ async fn persist_result_payload(
         "storage": "inline_json",
         "artifact_format": encoded.format,
         "encoded_bytes": encoded_len,
+        "compute_timing_sec": compute_timing,
     });
 
     insert_result(

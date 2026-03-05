@@ -34,6 +34,7 @@ class TargetResult:
     result_payload: dict[str, Any] | None
     result_artifact_url: str | None
     result_artifact_format: str | None
+    result_diagnostics: dict[str, Any] | None
     job_payload: dict[str, Any]
     created_at_utc: str
 
@@ -65,6 +66,22 @@ class VectorMetrics:
     rel_inf: float
     abs_l2: float
     pass_threshold: bool
+
+
+@dataclass
+class RustJobTiming:
+    status: str | None
+    queue_wait_sec: float | None
+    run_sec: float | None
+    end_to_end_sec: float | None
+
+
+@dataclass
+class RustComputeTiming:
+    solve_mx_sec: float | None
+    bx_sec: float | None
+    cg_sec: float | None
+    comparable_compute_sec: float | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -115,6 +132,8 @@ def main() -> None:
         resolve_started = time.perf_counter()
         target = resolve_target_result(conn, args.result_id, args.job_id, args.snapshot_id)
         resolve_sec = time.perf_counter() - resolve_started
+        rust_job_timing = fetch_rust_job_timing(conn, target.job_id)
+        rust_compute_timing = extract_rust_compute_timing(target.result_diagnostics)
 
         load_started = time.perf_counter()
         result_payload = load_result_payload(target, s3)
@@ -170,6 +189,40 @@ def main() -> None:
     compare_sec = time.perf_counter() - compare_started
 
     total_sec = time.perf_counter() - total_started
+    bw_build_plus_solve_sec = build_sec + solve_sec
+    rust_run_vs_bw_solve = safe_ratio(rust_job_timing.run_sec, solve_sec)
+    rust_run_vs_bw_build_solve = safe_ratio(rust_job_timing.run_sec, bw_build_plus_solve_sec)
+    rust_compute_vs_bw_solve = safe_ratio(rust_compute_timing.comparable_compute_sec, solve_sec)
+    rust_compute_vs_bw_build_solve = safe_ratio(
+        rust_compute_timing.comparable_compute_sec, bw_build_plus_solve_sec
+    )
+
+    primary_ratio = rust_compute_vs_bw_build_solve
+    if primary_ratio is None:
+        primary_ratio = rust_run_vs_bw_build_solve
+
+    if primary_ratio is not None:
+        faster = (
+            "rust"
+            if primary_ratio < 1.0
+            else ("brightway" if primary_ratio > 1.0 else "same")
+        )
+        faster_factor = (
+            (1.0 / primary_ratio)
+            if primary_ratio > 0 and primary_ratio < 1.0
+            else primary_ratio
+        )
+        if rust_compute_timing.comparable_compute_sec is not None:
+            faster_note = f"{faster} faster (comparable compute)"
+        else:
+            faster_note = f"{faster} faster (job run)"
+        if faster == "same":
+            faster_note = "same speed"
+    else:
+        faster = "unknown"
+        faster_factor = None
+        faster_note = "unknown"
+
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     report = {
         "run_utc": now_utc,
@@ -200,6 +253,34 @@ def main() -> None:
             "h": h_metrics,
             "lcia_score": lcia_check,
         },
+        "speed_comparison": {
+            "rust_job": {
+                "status": rust_job_timing.status,
+                "queue_wait_sec": rust_job_timing.queue_wait_sec,
+                "run_sec": rust_job_timing.run_sec,
+                "end_to_end_sec": rust_job_timing.end_to_end_sec,
+            },
+            "rust_compute": {
+                "solve_mx_sec": rust_compute_timing.solve_mx_sec,
+                "bx_sec": rust_compute_timing.bx_sec,
+                "cg_sec": rust_compute_timing.cg_sec,
+                "comparable_compute_sec": rust_compute_timing.comparable_compute_sec,
+            },
+            "brightway": {
+                "build_matrices_sec": build_sec,
+                "solve_sec": solve_sec,
+                "build_plus_solve_sec": bw_build_plus_solve_sec,
+            },
+            "ratios": {
+                "rust_run_over_brightway_solve": rust_run_vs_bw_solve,
+                "rust_run_over_brightway_build_plus_solve": rust_run_vs_bw_build_solve,
+                "rust_comparable_compute_over_brightway_solve": rust_compute_vs_bw_solve,
+                "rust_comparable_compute_over_brightway_build_plus_solve": rust_compute_vs_bw_build_solve,
+                "faster_side": faster,
+                "faster_factor": faster_factor,
+                "note": faster_note,
+            },
+        },
         "timing_sec": {
             "total": total_sec,
             "resolve_target": resolve_sec,
@@ -222,6 +303,23 @@ def main() -> None:
     print(f"[report] json={json_path}")
     print(f"[report] md={md_path}")
     print(f"[timing] total_sec={total_sec:.6f}")
+    print(
+        "[speed] rust_job_run_sec={} rust_comparable_compute_sec={} brightway_solve_sec={:.6f} brightway_build_plus_solve_sec={:.6f}".format(
+            format_optional_float(rust_job_timing.run_sec),
+            format_optional_float(rust_compute_timing.comparable_compute_sec),
+            solve_sec,
+            bw_build_plus_solve_sec,
+        )
+    )
+    print(
+        "[speed] rust_over_bw_solve={} rust_over_bw_build_plus_solve={} rust_compute_over_bw_solve={} rust_compute_over_bw_build_plus_solve={} faster={}".format(
+            format_optional_float(rust_run_vs_bw_solve),
+            format_optional_float(rust_run_vs_bw_build_solve),
+            format_optional_float(rust_compute_vs_bw_solve),
+            format_optional_float(rust_compute_vs_bw_build_solve),
+            faster_note,
+        )
+    )
 
     if args.fail_on_threshold and verdict != "pass":
         raise SystemExit(3)
@@ -241,6 +339,7 @@ def resolve_target_result(
                 r.snapshot_id::text AS snapshot_id,
                 j.job_type AS job_type,
                 r.payload AS result_payload,
+                r.diagnostics AS result_diagnostics,
                 r.artifact_url AS result_artifact_url,
                 r.artifact_format AS result_artifact_format,
                 j.payload AS job_payload,
@@ -259,6 +358,7 @@ def resolve_target_result(
                 r.snapshot_id::text AS snapshot_id,
                 j.job_type AS job_type,
                 r.payload AS result_payload,
+                r.diagnostics AS result_diagnostics,
                 r.artifact_url AS result_artifact_url,
                 r.artifact_format AS result_artifact_format,
                 j.payload AS job_payload,
@@ -280,6 +380,7 @@ def resolve_target_result(
                     r.snapshot_id::text AS snapshot_id,
                     j.job_type AS job_type,
                     r.payload AS result_payload,
+                    r.diagnostics AS result_diagnostics,
                     r.artifact_url AS result_artifact_url,
                     r.artifact_format AS result_artifact_format,
                     j.payload AS job_payload,
@@ -300,6 +401,7 @@ def resolve_target_result(
                     r.snapshot_id::text AS snapshot_id,
                     j.job_type AS job_type,
                     r.payload AS result_payload,
+                    r.diagnostics AS result_diagnostics,
                     r.artifact_url AS result_artifact_url,
                     r.artifact_format AS result_artifact_format,
                     j.payload AS job_payload,
@@ -326,10 +428,67 @@ def resolve_target_result(
         snapshot_id=row["snapshot_id"],
         job_type=row["job_type"],
         result_payload=as_json_dict(row["result_payload"]),
+        result_diagnostics=as_json_dict(row["result_diagnostics"]),
         result_artifact_url=row["result_artifact_url"],
         result_artifact_format=row["result_artifact_format"],
         job_payload=as_json_dict(row["job_payload"]) or {},
         created_at_utc=row["created_at_utc"] or "",
+    )
+
+
+def fetch_rust_job_timing(conn: psycopg.Connection[Any], job_id: str) -> RustJobTiming:
+    row = conn.execute(
+        """
+        SELECT
+            status,
+            EXTRACT(EPOCH FROM (started_at - created_at)) AS queue_wait_sec,
+            EXTRACT(EPOCH FROM (finished_at - started_at)) AS run_sec,
+            EXTRACT(EPOCH FROM (finished_at - created_at)) AS end_to_end_sec
+        FROM public.lca_jobs
+        WHERE id = %s::uuid
+        LIMIT 1
+        """,
+        (job_id,),
+    ).fetchone()
+    if not row:
+        return RustJobTiming(
+            status=None,
+            queue_wait_sec=None,
+            run_sec=None,
+            end_to_end_sec=None,
+        )
+    return RustJobTiming(
+        status=str(row["status"]) if row["status"] is not None else None,
+        queue_wait_sec=as_optional_float(row["queue_wait_sec"]),
+        run_sec=as_optional_float(row["run_sec"]),
+        end_to_end_sec=as_optional_float(row["end_to_end_sec"]),
+    )
+
+
+def extract_rust_compute_timing(
+    result_diagnostics: dict[str, Any] | None,
+) -> RustComputeTiming:
+    if not result_diagnostics:
+        return RustComputeTiming(None, None, None, None)
+
+    timing = result_diagnostics.get("compute_timing_sec")
+    if not isinstance(timing, dict):
+        return RustComputeTiming(None, None, None, None)
+
+    solve_mx_sec = as_optional_float(timing.get("solve_mx_sec"))
+    bx_sec = as_optional_float(timing.get("bx_sec"))
+    cg_sec = as_optional_float(timing.get("cg_sec"))
+    comparable_compute_sec = as_optional_float(timing.get("comparable_compute_sec"))
+    if comparable_compute_sec is None and solve_mx_sec is not None:
+        comparable_compute_sec = (
+            solve_mx_sec + (bx_sec or 0.0) + (cg_sec or 0.0)
+        )
+
+    return RustComputeTiming(
+        solve_mx_sec=solve_mx_sec,
+        bx_sec=bx_sec,
+        cg_sec=cg_sec,
+        comparable_compute_sec=comparable_compute_sec,
     )
 
 
@@ -555,6 +714,24 @@ def normalized_residual(
     return num / denom
 
 
+def safe_ratio(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or denominator == 0.0:
+        return None
+    return float(numerator / denominator)
+
+
+def as_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def format_optional_float(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.6f}"
+
+
 def as_json_dict(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -633,6 +810,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
     timing = report["timing_sec"]
     residual = report["residual"]
     compare = report["comparison"]
+    speed = report["speed_comparison"]
 
     def metric_line(name: str, metric: dict[str, Any] | None) -> str:
         if metric is None:
@@ -686,6 +864,24 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             "",
             f"- bw_rel_inf: `{residual['bw_rel_inf']}`",
             f"- rust_rel_inf: `{residual['rust_rel_inf']}`",
+            "",
+            "## Speed Comparison",
+            "",
+            f"- rust_job_status: `{speed['rust_job']['status']}`",
+            f"- rust_job_queue_wait_sec: `{speed['rust_job']['queue_wait_sec']}`",
+            f"- rust_job_run_sec: `{speed['rust_job']['run_sec']}`",
+            f"- rust_job_end_to_end_sec: `{speed['rust_job']['end_to_end_sec']}`",
+            f"- rust_compute_solve_mx_sec: `{speed['rust_compute']['solve_mx_sec']}`",
+            f"- rust_compute_bx_sec: `{speed['rust_compute']['bx_sec']}`",
+            f"- rust_compute_cg_sec: `{speed['rust_compute']['cg_sec']}`",
+            f"- rust_compute_comparable_sec: `{speed['rust_compute']['comparable_compute_sec']}`",
+            f"- brightway_solve_sec: `{speed['brightway']['solve_sec']}`",
+            f"- brightway_build_plus_solve_sec: `{speed['brightway']['build_plus_solve_sec']}`",
+            f"- rust_run_over_brightway_solve: `{speed['ratios']['rust_run_over_brightway_solve']}`",
+            f"- rust_run_over_brightway_build_plus_solve: `{speed['ratios']['rust_run_over_brightway_build_plus_solve']}`",
+            f"- rust_comparable_compute_over_brightway_solve: `{speed['ratios']['rust_comparable_compute_over_brightway_solve']}`",
+            f"- rust_comparable_compute_over_brightway_build_plus_solve: `{speed['ratios']['rust_comparable_compute_over_brightway_build_plus_solve']}`",
+            f"- faster_side: `{speed['ratios']['faster_side']}` (`{speed['ratios']['note']}`)",
             "",
             "## Timing (sec)",
             "",

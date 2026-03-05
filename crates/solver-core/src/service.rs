@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use suitesparse_ffi::{UmfpackError, UmfpackFactorization, UmfpackNumericOptions};
@@ -85,6 +86,28 @@ pub struct SolveResult {
     pub h: Option<Vec<f64>>,
     /// Factorization state at solve time.
     pub factorization_state: FactorizationState,
+}
+
+/// Detailed compute timing for one solve call, excluding queue/DB/object-storage I/O.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SolveComputationTiming {
+    /// Time spent in sparse back-substitution `Mx=y`.
+    pub solve_mx_sec: f64,
+    /// Time spent computing `g = Bx` (if needed by options).
+    pub bx_sec: f64,
+    /// Time spent computing `h = Cg` (if requested).
+    pub cg_sec: f64,
+    /// Sum of the comparable compute stages.
+    pub comparable_compute_sec: f64,
+}
+
+/// Solve output plus timing breakdown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimedSolveResult {
+    /// Functional solve output.
+    pub result: SolveResult,
+    /// Compute timing breakdown.
+    pub timing: SolveComputationTiming,
 }
 
 /// Multi-RHS solve result.
@@ -205,6 +228,20 @@ impl SolverService {
         rhs: &[f64],
         solve_options: SolveOptions,
     ) -> Result<SolveResult, SolverError> {
+        Ok(self
+            .solve_one_timed(model_version, options, rhs, solve_options)?
+            .result)
+    }
+
+    /// Solves one RHS and returns per-stage compute timing.
+    #[instrument(skip_all, fields(model_version = %model_version))]
+    pub fn solve_one_timed(
+        &self,
+        model_version: Uuid,
+        options: NumericOptions,
+        rhs: &[f64],
+        solve_options: SolveOptions,
+    ) -> Result<TimedSolveResult, SolverError> {
         let key = Self::factorization_key(model_version, options);
         let prepared = self
             .cache
@@ -220,24 +257,45 @@ impl SolverService {
             });
         }
 
+        let solve_started = Instant::now();
         let x = prepared.factorization.solve(rhs)?;
+        let solve_mx_sec = solve_started.elapsed().as_secs_f64();
+
+        let mut bx_sec = 0.0_f64;
         let g = if solve_options.return_g || solve_options.return_h {
-            Some(prepared.b.mul_vector(&x))
+            let bx_started = Instant::now();
+            let g_vec = prepared.b.mul_vector(&x);
+            bx_sec = bx_started.elapsed().as_secs_f64();
+            Some(g_vec)
         } else {
             None
         };
 
+        let mut cg_sec = 0.0_f64;
         let h = if solve_options.return_h {
-            g.as_ref().map(|g_vec| prepared.c.mul_vector(g_vec))
+            let cg_started = Instant::now();
+            let h_vec = g.as_ref().map(|g_vec| prepared.c.mul_vector(g_vec));
+            cg_sec = cg_started.elapsed().as_secs_f64();
+            h_vec
         } else {
             None
         };
 
-        Ok(SolveResult {
+        let result = SolveResult {
             x: solve_options.return_x.then_some(x),
             g: solve_options.return_g.then_some(g.unwrap_or_default()),
             h,
             factorization_state: FactorizationState::Ready,
+        };
+
+        Ok(TimedSolveResult {
+            result,
+            timing: SolveComputationTiming {
+                solve_mx_sec,
+                bx_sec,
+                cg_sec,
+                comparable_compute_sec: solve_mx_sec + bx_sec + cg_sec,
+            },
         })
     }
 

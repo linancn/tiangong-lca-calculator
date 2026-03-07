@@ -92,7 +92,10 @@ async fn run_gc(
 
         if cli.dry_run {
             for c in &candidates {
-                println!("[dry-run] candidate result_id={} url={}", c.result_id, c.artifact_url);
+                println!(
+                    "[dry-run] candidate result_id={} url={}",
+                    c.result_id, c.artifact_url
+                );
             }
             continue;
         }

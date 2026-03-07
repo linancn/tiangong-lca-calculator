@@ -16,6 +16,15 @@ Required command:
 cargo clippy -p solver-worker --all-targets --all-features -- -D warnings
 ```
 
+After every code change, run Rust format check and make it pass before finishing the task.
+This is a hard gate.
+
+Required command:
+
+```bash
+cargo fmt --all -- --check
+```
+
 Must always stay aligned with:
 
 - architecture boundaries
@@ -206,6 +215,12 @@ Mandatory lint gate after every code edit:
 
 ```bash
 cargo clippy -p solver-worker --all-targets --all-features -- -D warnings
+```
+
+Mandatory format gate after every code edit:
+
+```bash
+cargo fmt --all -- --check
 ```
 
 Run worker (local):

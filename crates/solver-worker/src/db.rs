@@ -613,15 +613,15 @@ pub async fn handle_job_payload(state: &AppState, payload: JobPayload) -> anyhow
             );
             let _ = update_job_status(&state.pool, job_id, "completed", completed_diag).await?;
 
-            if let Some(result_id) = latest_result_id_for_job(&state.pool, job_id).await? {
-                if let Err(err) = mark_result_cache_ready(&state.pool, job_id, result_id).await {
-                    warn!(
-                        error = %err,
-                        job_id = %job_id,
-                        result_id = %result_id,
-                        "failed to mark result cache ready"
-                    );
-                }
+            if let Some(result_id) = latest_result_id_for_job(&state.pool, job_id).await?
+                && let Err(err) = mark_result_cache_ready(&state.pool, job_id, result_id).await
+            {
+                warn!(
+                    error = %err,
+                    job_id = %job_id,
+                    result_id = %result_id,
+                    "failed to mark result cache ready"
+                );
             }
         }
         JobPayload::SolveBatch {
@@ -665,15 +665,15 @@ pub async fn handle_job_payload(state: &AppState, payload: JobPayload) -> anyhow
             );
             let _ = update_job_status(&state.pool, job_id, "completed", completed_diag).await?;
 
-            if let Some(result_id) = latest_result_id_for_job(&state.pool, job_id).await? {
-                if let Err(err) = mark_result_cache_ready(&state.pool, job_id, result_id).await {
-                    warn!(
-                        error = %err,
-                        job_id = %job_id,
-                        result_id = %result_id,
-                        "failed to mark result cache ready"
-                    );
-                }
+            if let Some(result_id) = latest_result_id_for_job(&state.pool, job_id).await?
+                && let Err(err) = mark_result_cache_ready(&state.pool, job_id, result_id).await
+            {
+                warn!(
+                    error = %err,
+                    job_id = %job_id,
+                    result_id = %result_id,
+                    "failed to mark result cache ready"
+                );
             }
         }
         JobPayload::InvalidateFactorization {

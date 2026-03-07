@@ -50,38 +50,99 @@ struct GcCandidate {
     artifact_url: String,
 }
 
+#[derive(Debug, Default)]
+struct GcTotals {
+    total_candidates: u64,
+    total_db_deleted: u64,
+    total_s3_deleted: u64,
+    total_s3_failed: u64,
+    batches: i64,
+}
+
+fn required<'a>(value: Option<&'a str>, name: &str) -> anyhow::Result<&'a str> {
+    value.ok_or_else(|| anyhow::anyhow!("missing {name}"))
+}
+
+fn resolve_db_url(cli: &Cli) -> anyhow::Result<&str> {
+    cli.database_url
+        .as_deref()
+        .or(cli.conn.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("missing DB connection: set DATABASE_URL or CONN"))
+}
+
+async fn run_gc(
+    pool: &sqlx::PgPool,
+    store: &ObjectStoreClient,
+    cli: &Cli,
+) -> anyhow::Result<GcTotals> {
+    let mut totals = GcTotals::default();
+    loop {
+        if let Some(limit) = cli.max_batches
+            && totals.batches >= limit
+        {
+            break;
+        }
+        let candidates = fetch_gc_candidates(pool, cli.batch_size).await?;
+        if candidates.is_empty() {
+            break;
+        }
+        totals.batches += 1;
+        totals.total_candidates += u64::try_from(candidates.len())
+            .map_err(|_| anyhow::anyhow!("candidate count overflow"))?;
+
+        if cli.dry_run {
+            for c in &candidates {
+                println!("[dry-run] candidate result_id={} url={}", c.result_id, c.artifact_url);
+            }
+            continue;
+        }
+
+        let mut deletable_ids = Vec::with_capacity(candidates.len());
+        for c in candidates {
+            match store.delete_object_url(&c.artifact_url).await {
+                Ok(()) => {
+                    deletable_ids.push(c.result_id);
+                    totals.total_s3_deleted += 1;
+                }
+                Err(err) => {
+                    totals.total_s3_failed += 1;
+                    eprintln!(
+                        "[warn] delete object failed result_id={} url={} error={err}",
+                        c.result_id, c.artifact_url
+                    );
+                }
+            }
+        }
+
+        if deletable_ids.is_empty() {
+            eprintln!(
+                "[warn] no DB rows deleted in batch={} because all S3 deletes failed; stop loop",
+                totals.batches
+            );
+            break;
+        }
+
+        let deleted = delete_results_by_ids(pool, deletable_ids).await?;
+        totals.total_db_deleted += deleted;
+        println!("[info] batch={} db_deleted={deleted}", totals.batches);
+    }
+
+    Ok(totals)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let db_url = cli
-        .database_url
-        .as_deref()
-        .or(cli.conn.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("missing DB connection: set DATABASE_URL or CONN"))?;
+    let db_url = resolve_db_url(&cli)?;
     if cli.batch_size <= 0 {
         return Err(anyhow::anyhow!("GC_BATCH_SIZE must be > 0"));
     }
 
-    let endpoint = cli
-        .s3_endpoint
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("missing S3_ENDPOINT"))?;
-    let region = cli
-        .s3_region
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("missing S3_REGION"))?;
-    let bucket = cli
-        .s3_bucket
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("missing S3_BUCKET"))?;
-    let access_key = cli
-        .s3_access_key_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("missing S3_ACCESS_KEY_ID"))?;
-    let secret = cli
-        .s3_secret_access_key
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("missing S3_SECRET_ACCESS_KEY"))?;
+    let endpoint = required(cli.s3_endpoint.as_deref(), "S3_ENDPOINT")?;
+    let region = required(cli.s3_region.as_deref(), "S3_REGION")?;
+    let bucket = required(cli.s3_bucket.as_deref(), "S3_BUCKET")?;
+    let access_key = required(cli.s3_access_key_id.as_deref(), "S3_ACCESS_KEY_ID")?;
+    let secret = required(cli.s3_secret_access_key.as_deref(), "S3_SECRET_ACCESS_KEY")?;
 
     let pool = PgPoolOptions::new()
         .max_connections(4)
@@ -94,72 +155,19 @@ async fn main() -> anyhow::Result<()> {
         &cli.s3_prefix,
         access_key,
         secret,
-        cli.s3_session_token,
+        cli.s3_session_token.clone(),
     )?;
 
-    let mut total_candidates = 0_u64;
-    let mut total_db_deleted = 0_u64;
-    let mut total_s3_deleted = 0_u64;
-    let mut total_s3_failed = 0_u64;
-    let mut batches = 0_i64;
-
-    loop {
-        if let Some(limit) = cli.max_batches
-            && batches >= limit
-        {
-            break;
-        }
-        let candidates = fetch_gc_candidates(&pool, cli.batch_size).await?;
-        if candidates.is_empty() {
-            break;
-        }
-        batches += 1;
-        total_candidates += u64::try_from(candidates.len())
-            .map_err(|_| anyhow::anyhow!("candidate count overflow"))?;
-
-        if cli.dry_run {
-            for c in &candidates {
-                println!(
-                    "[dry-run] candidate result_id={} url={}",
-                    c.result_id, c.artifact_url
-                );
-            }
-            continue;
-        }
-
-        let mut deletable_ids = Vec::with_capacity(candidates.len());
-        for c in candidates {
-            match store.delete_object_url(&c.artifact_url).await {
-                Ok(()) => {
-                    deletable_ids.push(c.result_id);
-                    total_s3_deleted += 1;
-                }
-                Err(err) => {
-                    total_s3_failed += 1;
-                    eprintln!(
-                        "[warn] delete object failed result_id={} url={} error={err}",
-                        c.result_id, c.artifact_url
-                    );
-                }
-            }
-        }
-
-        if deletable_ids.is_empty() {
-            eprintln!(
-                "[warn] no DB rows deleted in batch={} because all S3 deletes failed; stop loop",
-                batches
-            );
-            break;
-        }
-
-        let deleted = delete_results_by_ids(&pool, deletable_ids).await?;
-        total_db_deleted += deleted;
-        println!("[info] batch={} db_deleted={deleted}", batches);
-    }
+    let totals = run_gc(&pool, &store, &cli).await?;
 
     println!(
         "[summary] dry_run={} batches={} candidates={} s3_deleted={} s3_failed={} db_deleted={}",
-        cli.dry_run, batches, total_candidates, total_s3_deleted, total_s3_failed, total_db_deleted
+        cli.dry_run,
+        totals.batches,
+        totals.total_candidates,
+        totals.total_s3_deleted,
+        totals.total_s3_failed,
+        totals.total_db_deleted
     );
 
     Ok(())
@@ -170,7 +178,7 @@ async fn fetch_gc_candidates(
     batch_size: i64,
 ) -> anyhow::Result<Vec<GcCandidate>> {
     let rows = sqlx::query(
-        r#"
+        r"
         WITH ranked AS (
           SELECT
             r.id AS result_id,
@@ -198,7 +206,7 @@ async fn fetch_gc_candidates(
           AND rn > 1
         ORDER BY created_at ASC
         LIMIT $1
-        "#,
+        ",
     )
     .bind(batch_size)
     .fetch_all(pool)

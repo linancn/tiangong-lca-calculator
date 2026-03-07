@@ -281,7 +281,7 @@ make check
 
 ```bash
 set -a && source .env && set +a
-cargo run -p solver-worker --release
+cargo run -p solver-worker --bin solver-worker --release -- --mode worker
 ```
 
 ### 6.2 生产常驻（systemd，推荐）

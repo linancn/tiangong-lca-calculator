@@ -7,6 +7,15 @@ This document is for AI coding agents working in this repository.
 `AGENTS.md` is a living contract.
 Every time code/schema/runtime behavior changes in this repo, update this file in the same task.
 
+After every code change, run Clippy and make it pass before finishing the task.
+This is a hard gate.
+
+Required command:
+
+```bash
+cargo clippy -p solver-worker --all-targets --all-features -- -D warnings
+```
+
 Must always stay aligned with:
 
 - architecture boundaries
@@ -191,6 +200,12 @@ Build/check:
 
 ```bash
 make check
+```
+
+Mandatory lint gate after every code edit:
+
+```bash
+cargo clippy -p solver-worker --all-targets --all-features -- -D warnings
 ```
 
 Run worker (local):

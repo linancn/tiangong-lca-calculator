@@ -36,6 +36,9 @@ pub struct SnapshotBuildConfig {
     /// Allocation fraction mode (`strict`/`lenient`).
     #[serde(default = "default_strict_mode")]
     pub allocation_fraction_mode: String,
+    /// Biosphere sign convention (`signed`/`gross`).
+    #[serde(default = "default_biosphere_sign_mode")]
+    pub biosphere_sign_mode: String,
     /// Self-loop cutoff for technosphere diagonal filtering.
     pub self_loop_cutoff: f64,
     /// Near-singular epsilon.
@@ -122,6 +125,10 @@ pub struct SnapshotCoverageReport {
 
 fn default_strict_mode() -> String {
     "strict".to_owned()
+}
+
+fn default_biosphere_sign_mode() -> String {
+    "signed".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -260,6 +267,7 @@ fn write_hdf5_file(path: &Path, envelope_json: &[u8]) -> anyhow::Result<()> {
 mod tests {
     use hdf5::File;
     use hdf5::filters::Filter;
+    use serde_json::json;
     use solver_core::{ModelSparseData, SparseTriplet};
     use tempfile::Builder;
 
@@ -280,6 +288,7 @@ mod tests {
             provider_rule: "strict_unique_provider".to_owned(),
             reference_normalization_mode: "strict".to_owned(),
             allocation_fraction_mode: "strict".to_owned(),
+            biosphere_sign_mode: "gross".to_owned(),
             self_loop_cutoff: 0.999_999,
             singular_eps: 1e-12,
             has_lcia: true,
@@ -385,6 +394,24 @@ mod tests {
         assert_eq!(decoded.config, config);
         assert_eq!(decoded.coverage, coverage);
         assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn snapshot_build_config_defaults_legacy_biosphere_sign_mode() {
+        let legacy = json!({
+            "process_states": "100",
+            "process_limit": 0,
+            "provider_rule": "strict_unique_provider",
+            "reference_normalization_mode": "strict",
+            "allocation_fraction_mode": "strict",
+            "self_loop_cutoff": 0.999_999,
+            "singular_eps": 1e-12,
+            "has_lcia": true,
+            "method_id": null,
+            "method_version": null
+        });
+        let parsed: SnapshotBuildConfig = serde_json::from_value(legacy).expect("parse legacy");
+        assert_eq!(parsed.biosphere_sign_mode, "signed");
     }
 
     fn write_and_open_hdf5(bytes: &[u8]) -> File {

@@ -80,6 +80,7 @@ struct Cli {
 #[derive(Debug, Clone)]
 struct ProcessRow {
     id: Uuid,
+    model_id: Option<Uuid>,
     json: Value,
 }
 
@@ -122,6 +123,7 @@ enum AllocationMode {
 struct ProcessMeta {
     process_idx: i32,
     process_id: Uuid,
+    model_id: Option<Uuid>,
     location: Option<String>,
     reference_year: Option<i32>,
 }
@@ -289,6 +291,7 @@ async fn main() -> anyhow::Result<()> {
         provider_rule: cli.provider_rule.clone(),
         reference_normalization_mode: cli.reference_normalization_mode.clone(),
         allocation_fraction_mode: cli.allocation_fraction_mode.clone(),
+        biosphere_sign_mode: "gross".to_owned(),
         self_loop_cutoff: cli.self_loop_cutoff,
         singular_eps: cli.singular_eps,
         has_lcia: method.has_lcia,
@@ -322,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
         "[info] allocation_fraction_mode={}",
         cli.allocation_fraction_mode
     );
+    println!("[info] biosphere_sign_mode=gross");
     println!("[info] self_loop_cutoff={}", cli.self_loop_cutoff);
     println!("[info] singular_eps={}", cli.singular_eps);
     if method.has_lcia {
@@ -692,6 +696,7 @@ async fn build_sparse_payload(
             let process_meta = ProcessMeta {
                 process_idx,
                 process_id: proc_row.id,
+                model_id: proc_row.model_id,
                 location: parse_process_location(&proc_row.json),
                 reference_year: parse_process_reference_year(&proc_row.json),
             };
@@ -845,10 +850,7 @@ async fn build_sparse_payload(
             if elementary_flow_idx.contains(&flow_idx)
                 && let Some(amount) = ex.amount
             {
-                let value = match ex.direction {
-                    ExchangeDirection::Input => -amount,
-                    ExchangeDirection::Output => amount,
-                };
+                let value = biosphere_gross_value(amount);
                 if value.abs() > f64::EPSILON {
                     *b_map.entry((flow_idx, ex.process_idx)).or_insert(0.0) += value;
                 }
@@ -1321,8 +1323,22 @@ fn score_provider_candidates(
 ) -> anyhow::Result<Vec<ProviderCandidateScore>> {
     let consumer = process_meta_for_idx(process_meta, consumer_idx)
         .ok_or_else(|| anyhow::anyhow!("missing consumer process meta idx={consumer_idx}"))?;
+    let mut candidate_indices = Vec::<i32>::new();
+    if let Some(consumer_model_id) = consumer.model_id {
+        for provider_idx in providers {
+            if process_meta_for_idx(process_meta, *provider_idx)
+                .is_some_and(|provider| provider.model_id == Some(consumer_model_id))
+            {
+                candidate_indices.push(*provider_idx);
+            }
+        }
+    }
+    if candidate_indices.is_empty() {
+        candidate_indices.extend_from_slice(providers);
+    }
+
     let mut scored = Vec::with_capacity(providers.len());
-    for provider_idx in providers {
+    for provider_idx in &candidate_indices {
         let provider = process_meta_for_idx(process_meta, *provider_idx)
             .ok_or_else(|| anyhow::anyhow!("missing provider process meta idx={provider_idx}"))?;
         let geo = geo_score(consumer.location.as_deref(), provider.location.as_deref());
@@ -1476,6 +1492,10 @@ fn pct(numerator: i64, denominator: i64) -> f64 {
     } else {
         ((numerator as f64 / denominator as f64) * 10000.0).round() / 100.0
     }
+}
+
+fn biosphere_gross_value(amount: f64) -> f64 {
+    amount
 }
 
 async fn compute_source_fingerprint(
@@ -1692,7 +1712,7 @@ async fn fetch_processes(
     let rows = if all_states {
         sqlx::query(
             r#"
-            SELECT id, json
+            SELECT id, model_id, json
             FROM public.processes
             WHERE json ? 'processDataSet'
             ORDER BY id, version
@@ -1703,7 +1723,7 @@ async fn fetch_processes(
     } else {
         sqlx::query(
             r#"
-            SELECT id, json
+            SELECT id, model_id, json
             FROM public.processes
             WHERE state_code = ANY($1)
               AND json ? 'processDataSet'
@@ -1719,6 +1739,7 @@ async fn fetch_processes(
     for row in rows {
         out.push(ProcessRow {
             id: row.try_get::<Uuid, _>("id")?,
+            model_id: row.try_get::<Option<Uuid>, _>("model_id")?,
             json: row.try_get::<Value, _>("json")?,
         });
     }
@@ -2022,6 +2043,10 @@ fn write_report_files(
         config.allocation_fraction_mode
     ));
     md.push_str(&format!(
+        "- biosphere_sign_mode: `{}`\n",
+        config.biosphere_sign_mode
+    ));
+    md.push_str(&format!(
         "- self_loop_cutoff: `{}`\n",
         config.self_loop_cutoff
     ));
@@ -2232,8 +2257,8 @@ fn write_report_files(
 mod tests {
     use super::{
         AllocationMode, ExchangeDirection, NormalizationMode, ParsedExchange, ProcessMeta,
-        ProviderRule, geo_score, resolve_allocation_fraction, resolve_multi_provider,
-        resolve_reference_normalization, time_score,
+        ProviderRule, biosphere_gross_value, geo_score, resolve_allocation_fraction,
+        resolve_multi_provider, resolve_reference_normalization, time_score,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -2292,20 +2317,70 @@ mod tests {
             ProcessMeta {
                 process_idx: 0,
                 process_id: Uuid::new_v4(),
+                model_id: None,
                 location: Some("CN-BJ".to_owned()),
                 reference_year: Some(2026),
             },
             ProcessMeta {
                 process_idx: 1,
                 process_id: Uuid::new_v4(),
+                model_id: None,
                 location: Some("CN-BJ".to_owned()),
                 reference_year: Some(2026),
             },
             ProcessMeta {
                 process_idx: 2,
                 process_id: Uuid::new_v4(),
+                model_id: None,
                 location: Some("GLO".to_owned()),
                 reference_year: Some(2010),
+            },
+        ];
+        let exchange = ParsedExchange {
+            process_idx: 0,
+            flow_id: Uuid::new_v4(),
+            direction: ExchangeDirection::Input,
+            amount: Some(1.0),
+        };
+
+        let resolution = resolve_multi_provider(
+            ProviderRule::BestProviderStrict,
+            &exchange,
+            &[1, 2],
+            &process_meta,
+        )
+        .expect("resolve")
+        .expect("resolved");
+        assert_eq!(resolution.allocations.len(), 1);
+        assert_eq!(resolution.allocations[0].0, 1);
+        assert_close(resolution.allocations[0].1, 1.0);
+    }
+
+    #[test]
+    fn best_provider_strict_prefers_same_model_id_before_geo_time() {
+        let model_consumer = Uuid::new_v4();
+        let model_other = Uuid::new_v4();
+        let process_meta = vec![
+            ProcessMeta {
+                process_idx: 0,
+                process_id: Uuid::new_v4(),
+                model_id: Some(model_consumer),
+                location: Some("CN-BJ".to_owned()),
+                reference_year: Some(2026),
+            },
+            ProcessMeta {
+                process_idx: 1,
+                process_id: Uuid::new_v4(),
+                model_id: Some(model_consumer),
+                location: Some("CN".to_owned()),
+                reference_year: Some(2024),
+            },
+            ProcessMeta {
+                process_idx: 2,
+                process_id: Uuid::new_v4(),
+                model_id: Some(model_other),
+                location: Some("CN-BJ".to_owned()),
+                reference_year: Some(2026),
             },
         ];
         let exchange = ParsedExchange {
@@ -2386,5 +2461,12 @@ mod tests {
         assert_eq!(stats.normalized_processes, 1);
         assert_eq!(stats.missing_reference, 0);
         assert_eq!(stats.invalid_reference, 0);
+    }
+
+    #[test]
+    fn biosphere_gross_value_preserves_input_sign() {
+        assert_close(biosphere_gross_value(5.0), 5.0);
+        assert_close(biosphere_gross_value(-5.0), -5.0);
+        assert_close(biosphere_gross_value(0.0), 0.0);
     }
 }

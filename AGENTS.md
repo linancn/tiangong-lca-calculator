@@ -101,7 +101,11 @@ Behavior:
   - mode: `allocation_fraction_mode=strict|lenient` (CLI, default `strict`)
   - strict: missing/invalid fraction => fail snapshot build
   - lenient: fallback fraction `1.0` and record diagnostics
+- biosphere sign convention for elementary flows uses gross mode:
+  - `Input`/`Output` no longer force direction sign flip; both are written with original `amount` sign into `B`
+  - snapshot config persists `biosphere_sign_mode` (current runtime value: `gross`; legacy artifact default: `signed`)
 - auto-link scoring currently uses only:
+  - model priority pre-filter: prefer providers with the same `processes.model_id` as consumer when available
   - geography (`@location`) from process geography block
   - reference year (`common:referenceYear`) from process time block
 - snapshot coverage now includes additional matching diagnostics:

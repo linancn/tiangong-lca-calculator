@@ -5,6 +5,7 @@
 ## 1. 范围与原则
 
 - 数值核心固定为 `M = I - A`，只解 `M x = y`。
+- `snapshot_builder` 对 elementary flow 的 `B` 采用 `gross` 口径（`Input/Output` 均按原始 `amount` 入模，不做方向符号翻转）。
 - 计算入口是异步 `lca_jobs` + `pgmq`，不走前端直连队列。
 - 主路径读取 `lca_snapshot_artifacts`（artifact-first），旧 `lca_*_entries` 仅兼容回退。
 - 所有写操作由服务端（Edge Function / worker，`service_role`）执行。

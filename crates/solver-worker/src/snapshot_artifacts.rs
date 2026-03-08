@@ -30,6 +30,12 @@ pub struct SnapshotBuildConfig {
     pub process_limit: i32,
     /// Provider matching mode.
     pub provider_rule: String,
+    /// Quantitative reference normalization mode (`strict`/`lenient`).
+    #[serde(default = "default_strict_mode")]
+    pub reference_normalization_mode: String,
+    /// Allocation fraction mode (`strict`/`lenient`).
+    #[serde(default = "default_strict_mode")]
+    pub allocation_fraction_mode: String,
     /// Self-loop cutoff for technosphere diagonal filtering.
     pub self_loop_cutoff: f64,
     /// Near-singular epsilon.
@@ -61,6 +67,24 @@ pub struct SnapshotMatchingCoverage {
     pub any_provider_match_pct: f64,
 }
 
+/// Quantitative reference diagnostics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SnapshotReferenceCoverage {
+    pub process_total: i64,
+    pub normalized_process_count: i64,
+    pub missing_reference_count: i64,
+    pub invalid_reference_count: i64,
+}
+
+/// Allocation diagnostics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SnapshotAllocationCoverage {
+    pub exchange_total: i64,
+    pub allocation_fraction_present_pct: f64,
+    pub allocation_fraction_missing_count: i64,
+    pub allocation_fraction_invalid_count: i64,
+}
+
 /// Singular risk diagnostics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotSingularRisk {
@@ -88,8 +112,16 @@ pub struct SnapshotMatrixScale {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotCoverageReport {
     pub matching: SnapshotMatchingCoverage,
+    #[serde(default)]
+    pub reference: SnapshotReferenceCoverage,
+    #[serde(default)]
+    pub allocation: SnapshotAllocationCoverage,
     pub singular_risk: SnapshotSingularRisk,
     pub matrix_scale: SnapshotMatrixScale,
+}
+
+fn default_strict_mode() -> String {
+    "strict".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -232,18 +264,22 @@ mod tests {
     use tempfile::Builder;
 
     use super::{
-        DATASET_ENVELOPE_JSON, HDF5_DEFLATE_LEVEL, SNAPSHOT_ARTIFACT_FORMAT, SnapshotBuildConfig,
-        SnapshotCoverageReport, SnapshotMatchingCoverage, SnapshotMatrixScale,
+        DATASET_ENVELOPE_JSON, HDF5_DEFLATE_LEVEL, SNAPSHOT_ARTIFACT_FORMAT,
+        SnapshotAllocationCoverage, SnapshotBuildConfig, SnapshotCoverageReport,
+        SnapshotMatchingCoverage, SnapshotMatrixScale, SnapshotReferenceCoverage,
         SnapshotSingularRisk, decode_snapshot_artifact, encode_snapshot_artifact,
     };
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn encode_decode_snapshot_artifact_roundtrip() {
         let snapshot_id = uuid::Uuid::new_v4();
         let config = SnapshotBuildConfig {
             process_states: "100".to_owned(),
             process_limit: 0,
             provider_rule: "strict_unique_provider".to_owned(),
+            reference_normalization_mode: "strict".to_owned(),
+            allocation_fraction_mode: "strict".to_owned(),
             self_loop_cutoff: 0.999_999,
             singular_eps: 1e-12,
             has_lcia: true,
@@ -262,6 +298,18 @@ mod tests {
                 a_input_edges_written: 8,
                 unique_provider_match_pct: 70.0,
                 any_provider_match_pct: 90.0,
+            },
+            reference: SnapshotReferenceCoverage {
+                process_total: 2,
+                normalized_process_count: 2,
+                missing_reference_count: 0,
+                invalid_reference_count: 0,
+            },
+            allocation: SnapshotAllocationCoverage {
+                exchange_total: 4,
+                allocation_fraction_present_pct: 100.0,
+                allocation_fraction_missing_count: 0,
+                allocation_fraction_invalid_count: 0,
             },
             singular_risk: SnapshotSingularRisk {
                 risk_level: "low".to_owned(),

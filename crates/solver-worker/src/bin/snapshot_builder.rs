@@ -22,8 +22,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use solver_core::{ModelSparseData, SparseTriplet};
 use solver_worker::snapshot_artifacts::{
-    SNAPSHOT_ARTIFACT_FORMAT, SnapshotBuildConfig, SnapshotCoverageReport,
-    SnapshotMatchingCoverage, SnapshotMatrixScale, SnapshotSingularRisk, encode_snapshot_artifact,
+    SNAPSHOT_ARTIFACT_FORMAT, SnapshotAllocationCoverage, SnapshotBuildConfig,
+    SnapshotCoverageReport, SnapshotMatchingCoverage, SnapshotMatrixScale,
+    SnapshotReferenceCoverage, SnapshotSingularRisk, encode_snapshot_artifact,
 };
 use solver_worker::storage::ObjectStoreClient;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
@@ -58,6 +59,10 @@ struct Cli {
     process_limit: usize,
     #[arg(long, default_value = "strict_unique_provider")]
     provider_rule: String,
+    #[arg(long, default_value = "strict")]
+    reference_normalization_mode: String,
+    #[arg(long, default_value = "strict")]
+    allocation_fraction_mode: String,
     #[arg(long, default_value_t = 0.999_999)]
     self_loop_cutoff: f64,
     #[arg(long, default_value_t = 1e-12)]
@@ -101,6 +106,18 @@ enum ProviderRule {
     SplitEqual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NormalizationMode {
+    Strict,
+    Lenient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllocationMode {
+    Strict,
+    Lenient,
+}
+
 #[derive(Debug, Clone)]
 struct ProcessMeta {
     process_idx: i32,
@@ -118,6 +135,21 @@ struct ProviderCandidateScore {
     final_score: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ReferenceParseStats {
+    missing_reference: i64,
+    invalid_reference: i64,
+    normalized_processes: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AllocationParseStats {
+    exchange_total: i64,
+    fraction_present_count: i64,
+    fraction_missing_count: i64,
+    fraction_invalid_count: i64,
+}
+
 #[derive(Debug, Clone)]
 struct MethodSelection {
     has_lcia: bool,
@@ -131,6 +163,14 @@ struct BuildOutput {
     data: ModelSparseData,
     coverage: SnapshotCoverageReport,
 }
+
+type ParsedProcessChunk = (
+    ProcessMeta,
+    Vec<ParsedExchange>,
+    BTreeSet<Uuid>,
+    ReferenceParseStats,
+    AllocationParseStats,
+);
 
 #[derive(Debug, Clone, Serialize)]
 struct SourceSnapshotSummary {
@@ -184,11 +224,37 @@ impl ProviderRule {
     }
 }
 
+impl NormalizationMode {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "strict" => Ok(Self::Strict),
+            "lenient" => Ok(Self::Lenient),
+            _ => Err(anyhow::anyhow!(
+                "unsupported reference_normalization_mode={value}; expected strict or lenient"
+            )),
+        }
+    }
+}
+
+impl AllocationMode {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "strict" => Ok(Self::Strict),
+            "lenient" => Ok(Self::Lenient),
+            _ => Err(anyhow::anyhow!(
+                "unsupported allocation_fraction_mode={value}; expected strict or lenient"
+            )),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let total_started = Instant::now();
     let cli = Cli::parse();
     let provider_rule = ProviderRule::parse(&cli.provider_rule)?;
+    let reference_normalization_mode = NormalizationMode::parse(&cli.reference_normalization_mode)?;
+    let allocation_mode = AllocationMode::parse(&cli.allocation_fraction_mode)?;
 
     let db_url = cli
         .database_url
@@ -221,6 +287,8 @@ async fn main() -> anyhow::Result<()> {
         process_limit: i32::try_from(cli.process_limit)
             .map_err(|_| anyhow::anyhow!("process_limit overflow"))?,
         provider_rule: cli.provider_rule.clone(),
+        reference_normalization_mode: cli.reference_normalization_mode.clone(),
+        allocation_fraction_mode: cli.allocation_fraction_mode.clone(),
         self_loop_cutoff: cli.self_loop_cutoff,
         singular_eps: cli.singular_eps,
         has_lcia: method.has_lcia,
@@ -246,6 +314,14 @@ async fn main() -> anyhow::Result<()> {
     println!("[info] process_states={process_states_label}");
     println!("[info] process_limit={}", cli.process_limit);
     println!("[info] provider_rule={}", cli.provider_rule);
+    println!(
+        "[info] reference_normalization_mode={}",
+        cli.reference_normalization_mode
+    );
+    println!(
+        "[info] allocation_fraction_mode={}",
+        cli.allocation_fraction_mode
+    );
     println!("[info] self_loop_cutoff={}", cli.self_loop_cutoff);
     println!("[info] singular_eps={}", cli.singular_eps);
     if method.has_lcia {
@@ -324,6 +400,8 @@ async fn main() -> anyhow::Result<()> {
         &state_codes,
         cli.process_limit,
         provider_rule,
+        reference_normalization_mode,
+        allocation_mode,
         cli.self_loop_cutoff,
         cli.singular_eps,
         method.has_lcia,
@@ -588,6 +666,8 @@ async fn build_sparse_payload(
     state_codes: &[i32],
     process_limit: usize,
     provider_rule: ProviderRule,
+    reference_normalization_mode: NormalizationMode,
+    allocation_mode: AllocationMode,
     self_loop_cutoff: f64,
     singular_eps: f64,
     has_lcia: bool,
@@ -606,65 +686,100 @@ async fn build_sparse_payload(
     let chunks = processes
         .par_iter()
         .enumerate()
-        .map(
-            |(idx, proc_row)| -> anyhow::Result<(ProcessMeta, Vec<ParsedExchange>, BTreeSet<Uuid>)> {
-                let process_idx =
-                    i32::try_from(idx).map_err(|_| anyhow::anyhow!("process index overflow"))?;
-                let process_meta = ProcessMeta {
-                    process_idx,
-                    process_id: proc_row.id,
-                    location: parse_process_location(&proc_row.json),
-                    reference_year: parse_process_reference_year(&proc_row.json),
+        .map(|(idx, proc_row)| -> anyhow::Result<ParsedProcessChunk> {
+            let process_idx =
+                i32::try_from(idx).map_err(|_| anyhow::anyhow!("process index overflow"))?;
+            let process_meta = ProcessMeta {
+                process_idx,
+                process_id: proc_row.id,
+                location: parse_process_location(&proc_row.json),
+                reference_year: parse_process_reference_year(&proc_row.json),
+            };
+            let mut local_exchanges = Vec::new();
+            let mut local_flow_ids = BTreeSet::new();
+            let mut local_allocation = AllocationParseStats::default();
+            let exchange_items = process_exchange_items(&proc_row.json);
+            let (reference_scale, local_reference) = resolve_reference_normalization(
+                proc_row.id,
+                &proc_row.json,
+                &exchange_items,
+                reference_normalization_mode,
+            )?;
+
+            for ex in &exchange_items {
+                let direction = match ex
+                    .get("exchangeDirection")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                {
+                    "Input" => Some(ExchangeDirection::Input),
+                    "Output" => Some(ExchangeDirection::Output),
+                    _ => None,
                 };
-                let mut local_exchanges = Vec::new();
-                let mut local_flow_ids = BTreeSet::new();
-
-                for ex in process_exchange_items(&proc_row.json) {
-                    let direction = match ex
-                        .get("exchangeDirection")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                    {
-                        "Input" => Some(ExchangeDirection::Input),
-                        "Output" => Some(ExchangeDirection::Output),
-                        _ => None,
-                    };
-                    let Some(direction) = direction else {
-                        continue;
-                    };
-                    let Some(flow_id) =
-                        parse_uuid_at(ex, &["referenceToFlowDataSet", "@refObjectId"])
-                    else {
-                        continue;
-                    };
-                    let amount = parse_number(
-                        ex.get("meanAmount")
-                            .or_else(|| ex.get("resultingAmount"))
-                            .or_else(|| ex.get("meanValue")),
-                    );
-
-                    local_exchanges.push(ParsedExchange {
-                        process_idx,
-                        flow_id,
-                        direction,
-                        amount,
-                    });
-                    local_flow_ids.insert(flow_id);
+                let Some(direction) = direction else {
+                    continue;
+                };
+                let Some(flow_id) = parse_uuid_at(ex, &["referenceToFlowDataSet", "@refObjectId"])
+                else {
+                    continue;
+                };
+                local_allocation.exchange_total += 1;
+                let (allocation_fraction, allocation_state) =
+                    resolve_allocation_fraction(ex, allocation_mode)?;
+                match allocation_state {
+                    AllocationFractionState::Present => {
+                        local_allocation.fraction_present_count += 1;
+                    }
+                    AllocationFractionState::Missing => {
+                        local_allocation.fraction_missing_count += 1;
+                    }
+                    AllocationFractionState::Invalid => {
+                        local_allocation.fraction_invalid_count += 1;
+                    }
                 }
+                let amount = parse_number(
+                    ex.get("meanAmount")
+                        .or_else(|| ex.get("resultingAmount"))
+                        .or_else(|| ex.get("meanValue")),
+                )
+                .map(|raw| raw * reference_scale * allocation_fraction);
 
-                Ok((process_meta, local_exchanges, local_flow_ids))
-            },
-        )
+                local_exchanges.push(ParsedExchange {
+                    process_idx,
+                    flow_id,
+                    direction,
+                    amount,
+                });
+                local_flow_ids.insert(flow_id);
+            }
+
+            Ok((
+                process_meta,
+                local_exchanges,
+                local_flow_ids,
+                local_reference,
+                local_allocation,
+            ))
+        })
         .collect::<Vec<_>>();
 
     let mut exchanges = Vec::<ParsedExchange>::new();
     let mut process_meta_by_idx = HashMap::<i32, ProcessMeta>::with_capacity(processes.len());
     let mut flow_candidates: BTreeSet<Uuid> = BTreeSet::new();
+    let mut reference_stats = ReferenceParseStats::default();
+    let mut allocation_stats = AllocationParseStats::default();
     for chunk in chunks {
-        let (meta, chunk_exchanges, chunk_flow_ids) = chunk?;
+        let (meta, chunk_exchanges, chunk_flow_ids, chunk_reference, chunk_allocation) = chunk?;
         process_meta_by_idx.insert(meta.process_idx, meta);
         exchanges.extend(chunk_exchanges);
         flow_candidates.extend(chunk_flow_ids);
+        reference_stats.missing_reference += chunk_reference.missing_reference;
+        reference_stats.invalid_reference += chunk_reference.invalid_reference;
+        reference_stats.normalized_processes += chunk_reference.normalized_processes;
+        allocation_stats.exchange_total += chunk_allocation.exchange_total;
+        allocation_stats.fraction_present_count += chunk_allocation.fraction_present_count;
+        allocation_stats.fraction_missing_count += chunk_allocation.fraction_missing_count;
+        allocation_stats.fraction_invalid_count += chunk_allocation.fraction_invalid_count;
     }
 
     let mut process_meta = Vec::with_capacity(processes.len());
@@ -888,6 +1003,10 @@ async fn build_sparse_payload(
 
     let unique_provider_match_pct = pct(matched_unique, input_edges_total);
     let any_provider_match_pct = pct(matched_unique + matched_multi, input_edges_total);
+    let allocation_fraction_present_pct = pct(
+        allocation_stats.fraction_present_count,
+        allocation_stats.exchange_total,
+    );
 
     let coverage = SnapshotCoverageReport {
         matching: SnapshotMatchingCoverage {
@@ -901,6 +1020,18 @@ async fn build_sparse_payload(
             a_input_edges_written,
             unique_provider_match_pct,
             any_provider_match_pct,
+        },
+        reference: SnapshotReferenceCoverage {
+            process_total: process_count_i64,
+            normalized_process_count: reference_stats.normalized_processes,
+            missing_reference_count: reference_stats.missing_reference,
+            invalid_reference_count: reference_stats.invalid_reference,
+        },
+        allocation: SnapshotAllocationCoverage {
+            exchange_total: allocation_stats.exchange_total,
+            allocation_fraction_present_pct,
+            allocation_fraction_missing_count: allocation_stats.fraction_missing_count,
+            allocation_fraction_invalid_count: allocation_stats.fraction_invalid_count,
         },
         singular_risk: SnapshotSingularRisk {
             risk_level,
@@ -945,6 +1076,134 @@ const AUTO_LINK_TIME_WEIGHT: f64 = 0.3;
 const AUTO_LINK_MIN_SCORE: f64 = 0.35;
 const AUTO_LINK_TOP1_MIN_SCORE: f64 = 0.55;
 const AUTO_LINK_TOP1_TOP2_MIN_RATIO: f64 = 1.2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllocationFractionState {
+    Present,
+    Missing,
+    Invalid,
+}
+
+fn resolve_reference_normalization(
+    process_id: Uuid,
+    process_json: &Value,
+    exchanges: &[&Value],
+    mode: NormalizationMode,
+) -> anyhow::Result<(f64, ReferenceParseStats)> {
+    let mut stats = ReferenceParseStats::default();
+    let reference_internal_id = process_json
+        .get("processDataSet")
+        .and_then(|v| v.get("processInformation"))
+        .and_then(|v| v.get("quantitativeReference"))
+        .and_then(|v| v.get("referenceToReferenceFlow"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let Some(reference_internal_id) = reference_internal_id else {
+        stats.missing_reference = 1;
+        return match mode {
+            NormalizationMode::Strict => Err(anyhow::anyhow!(
+                "missing quantitativeReference.referenceToReferenceFlow for process={process_id}"
+            )),
+            NormalizationMode::Lenient => Ok((1.0, stats)),
+        };
+    };
+
+    let reference_exchange = exchanges.iter().copied().find(|exchange| {
+        exchange
+            .get("@dataSetInternalID")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            == Some(reference_internal_id)
+    });
+
+    let Some(reference_exchange) = reference_exchange else {
+        stats.invalid_reference = 1;
+        return match mode {
+            NormalizationMode::Strict => Err(anyhow::anyhow!(
+                "referenceToReferenceFlow={} not found in exchanges for process={process_id}",
+                reference_internal_id
+            )),
+            NormalizationMode::Lenient => Ok((1.0, stats)),
+        };
+    };
+
+    let reference_amount = parse_number(
+        reference_exchange
+            .get("meanAmount")
+            .or_else(|| reference_exchange.get("resultingAmount"))
+            .or_else(|| reference_exchange.get("meanValue")),
+    )
+    .map(f64::abs)
+    .filter(|value| *value > f64::EPSILON);
+    let Some(reference_amount) = reference_amount else {
+        stats.invalid_reference = 1;
+        return match mode {
+            NormalizationMode::Strict => Err(anyhow::anyhow!(
+                "invalid reference amount for process={process_id} reference_internal_id={}",
+                reference_internal_id
+            )),
+            NormalizationMode::Lenient => Ok((1.0, stats)),
+        };
+    };
+
+    stats.normalized_processes = 1;
+    Ok((1.0 / reference_amount, stats))
+}
+
+fn resolve_allocation_fraction(
+    exchange_json: &Value,
+    mode: AllocationMode,
+) -> anyhow::Result<(f64, AllocationFractionState)> {
+    let raw = exchange_json
+        .get("allocations")
+        .and_then(|v| v.get("allocation"))
+        .and_then(|v| v.get("@allocatedFraction"));
+    let Some(raw) = raw else {
+        return match mode {
+            AllocationMode::Strict => Err(anyhow::anyhow!(
+                "missing allocations.allocation.@allocatedFraction"
+            )),
+            AllocationMode::Lenient => Ok((1.0, AllocationFractionState::Missing)),
+        };
+    };
+
+    let parsed = match raw {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else if let Some(without_percent) = trimmed.strip_suffix('%') {
+                without_percent
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .map(|value| value / 100.0)
+            } else {
+                trimmed.parse::<f64>().ok().map(
+                    |value| {
+                        if value > 1.0 { value / 100.0 } else { value }
+                    },
+                )
+            }
+        }
+        _ => None,
+    };
+    let fraction = parsed.filter(|value| value.is_finite() && *value >= 0.0 && *value <= 1.0);
+    let Some(fraction) = fraction else {
+        return match mode {
+            AllocationMode::Strict => Err(anyhow::anyhow!(
+                "invalid allocations.allocation.@allocatedFraction={}",
+                raw
+            )),
+            AllocationMode::Lenient => Ok((1.0, AllocationFractionState::Invalid)),
+        };
+    };
+
+    Ok((fraction, AllocationFractionState::Present))
+}
 
 fn resolve_multi_provider(
     provider_rule: ProviderRule,
@@ -1755,6 +2014,14 @@ fn write_report_files(
     md.push_str(&format!("- process_limit: `{}`\n", config.process_limit));
     md.push_str(&format!("- provider_rule: `{}`\n", config.provider_rule));
     md.push_str(&format!(
+        "- reference_normalization_mode: `{}`\n",
+        config.reference_normalization_mode
+    ));
+    md.push_str(&format!(
+        "- allocation_fraction_mode: `{}`\n",
+        config.allocation_fraction_mode
+    ));
+    md.push_str(&format!(
         "- self_loop_cutoff: `{}`\n",
         config.self_loop_cutoff
     ));
@@ -1874,6 +2141,42 @@ fn write_report_files(
         coverage.matching.any_provider_match_pct
     ));
 
+    md.push_str("## Reference Coverage\n\n");
+    md.push_str(&format!(
+        "- process_total: `{}`\n",
+        coverage.reference.process_total
+    ));
+    md.push_str(&format!(
+        "- normalized_process_count: `{}`\n",
+        coverage.reference.normalized_process_count
+    ));
+    md.push_str(&format!(
+        "- missing_reference_count: `{}`\n",
+        coverage.reference.missing_reference_count
+    ));
+    md.push_str(&format!(
+        "- invalid_reference_count: `{}`\n\n",
+        coverage.reference.invalid_reference_count
+    ));
+
+    md.push_str("## Allocation Coverage\n\n");
+    md.push_str(&format!(
+        "- exchange_total: `{}`\n",
+        coverage.allocation.exchange_total
+    ));
+    md.push_str(&format!(
+        "- allocation_fraction_present_pct: `{}`\n",
+        coverage.allocation.allocation_fraction_present_pct
+    ));
+    md.push_str(&format!(
+        "- allocation_fraction_missing_count: `{}`\n",
+        coverage.allocation.allocation_fraction_missing_count
+    ));
+    md.push_str(&format!(
+        "- allocation_fraction_invalid_count: `{}`\n\n",
+        coverage.allocation.allocation_fraction_invalid_count
+    ));
+
     md.push_str("## Singular Risk\n\n");
     md.push_str(&format!(
         "- risk_level: `{}`\n",
@@ -1928,9 +2231,11 @@ fn write_report_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExchangeDirection, ParsedExchange, ProcessMeta, ProviderRule, geo_score,
-        resolve_multi_provider, time_score,
+        AllocationMode, ExchangeDirection, NormalizationMode, ParsedExchange, ProcessMeta,
+        ProviderRule, geo_score, resolve_allocation_fraction, resolve_multi_provider,
+        resolve_reference_normalization, time_score,
     };
+    use serde_json::json;
     use uuid::Uuid;
 
     fn assert_close(actual: f64, expected: f64) {
@@ -2021,5 +2326,65 @@ mod tests {
         assert_eq!(resolution.allocations.len(), 1);
         assert_eq!(resolution.allocations[0].0, 1);
         assert_close(resolution.allocations[0].1, 1.0);
+    }
+
+    #[test]
+    fn allocation_fraction_parses_percent_and_numeric() {
+        let exchange_percent = json!({
+            "allocations": { "allocation": { "@allocatedFraction": "25%" } }
+        });
+        let exchange_numeric = json!({
+            "allocations": { "allocation": { "@allocatedFraction": "25" } }
+        });
+        let (fraction_percent, _) =
+            resolve_allocation_fraction(&exchange_percent, AllocationMode::Strict).expect("parse");
+        let (fraction_numeric, _) =
+            resolve_allocation_fraction(&exchange_numeric, AllocationMode::Strict).expect("parse");
+        assert_close(fraction_percent, 0.25);
+        assert_close(fraction_numeric, 0.25);
+    }
+
+    #[test]
+    fn allocation_fraction_strict_fails_when_missing() {
+        let exchange = json!({});
+        let err =
+            resolve_allocation_fraction(&exchange, AllocationMode::Strict).expect_err("expected");
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn quantitative_reference_normalization_uses_reference_exchange() {
+        let process_id = Uuid::new_v4();
+        let process_json = json!({
+            "processDataSet": {
+                "processInformation": {
+                    "quantitativeReference": {
+                        "referenceToReferenceFlow": "2"
+                    }
+                }
+            }
+        });
+        let exchanges = [
+            json!({
+                "@dataSetInternalID": "1",
+                "meanAmount": "0.2"
+            }),
+            json!({
+                "@dataSetInternalID": "2",
+                "meanAmount": "0.5"
+            }),
+        ];
+        let exchange_refs = exchanges.iter().collect::<Vec<_>>();
+        let (scale, stats) = resolve_reference_normalization(
+            process_id,
+            &process_json,
+            exchange_refs.as_slice(),
+            NormalizationMode::Strict,
+        )
+        .expect("normalize");
+        assert_close(scale, 2.0);
+        assert_eq!(stats.normalized_processes, 1);
+        assert_eq!(stats.missing_reference, 0);
+        assert_eq!(stats.invalid_reference, 0);
     }
 }

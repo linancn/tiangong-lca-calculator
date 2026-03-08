@@ -92,6 +92,15 @@ Behavior:
   - `split_by_evidence` (strict weighted split by geo+time score)
   - `split_by_evidence_hybrid` (weighted split, fallback to equal split)
   - `split_equal` (always equal split for multi-provider)
+- quantitative reference normalization is applied at build time:
+  - mode: `reference_normalization_mode=strict|lenient` (CLI, default `strict`)
+  - strict: missing/invalid `referenceToReferenceFlow` or reference amount => fail snapshot build
+  - lenient: fallback scale `1.0` and record diagnostics
+- allocation fraction is applied at exchange level:
+  - source: `exchanges.exchange.allocations.allocation.@allocatedFraction`
+  - mode: `allocation_fraction_mode=strict|lenient` (CLI, default `strict`)
+  - strict: missing/invalid fraction => fail snapshot build
+  - lenient: fallback fraction `1.0` and record diagnostics
 - auto-link scoring currently uses only:
   - geography (`@location`) from process geography block
   - reference year (`common:referenceYear`) from process time block
@@ -100,6 +109,9 @@ Behavior:
   - `matched_multi_unresolved`
   - `matched_multi_fallback_equal`
   - `a_input_edges_written`
+- snapshot coverage also includes data-quality diagnostics:
+  - `reference`: `process_total`, `normalized_process_count`, `missing_reference_count`, `invalid_reference_count`
+  - `allocation`: `exchange_total`, `allocation_fraction_present_pct`, `allocation_fraction_missing_count`, `allocation_fraction_invalid_count`
 
 ## 3. Storage/result policy (strict)
 

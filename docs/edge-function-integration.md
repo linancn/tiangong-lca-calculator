@@ -26,6 +26,7 @@
 {
   "scope": "prod",
   "snapshot_id": "optional-uuid",
+  "demand_mode": "single",
   "demand": {
     "process_index": 123,
     "amount": 1.0
@@ -35,6 +36,22 @@
     "return_g": true,
     "return_h": true
   }
+}
+```
+
+全量单位需求模式（不传 `process_index/amount`）：
+
+```json
+{
+  "scope": "prod",
+  "snapshot_id": "optional-uuid",
+  "demand_mode": "all_unit",
+  "solve": {
+    "return_x": false,
+    "return_g": false,
+    "return_h": true
+  },
+  "unit_batch_size": 128
 }
 ```
 
@@ -84,7 +101,9 @@ Header 建议：
 3. 选择 `snapshot_id`：
    - 若请求显式给出，校验存在且可用。
    - 否则读 `lca_active_snapshots(scope='prod')`。
-4. 构造 `rhs`（长度 = `process_count`，只在目标 index 赋值 `amount`）。
+4. 构造求解负载：
+   - `demand_mode=single`：构造 `rhs`（长度 = `process_count`，只在目标 index 赋值 `amount`）。
+   - `demand_mode=all_unit`：构造 `solve_all_unit` payload（不在 Edge 侧生成整块 `rhs_batch`）。
 5. 生成：
    - `request_key`（标准化请求哈希）
    - `idempotency_key`（优先 header，否则退化为 `user_id + request_key`）
@@ -126,6 +145,7 @@ worker：
 - 使用 service role client（仅服务端）。
 - 封装 `resolve_snapshot(scope)`。
 - 封装 `build_rhs(process_count, process_index, amount)`。
+- 封装 `build_solve_all_unit_payload(snapshot_id, solve, unit_batch_size)`。
 - 封装 `make_request_key(normalized_input)`。
 - 封装 `enqueue_job_and_update_cache(...)` 事务函数。
 - 输出统一错误码（如 `BAD_INPUT` / `SNAPSHOT_NOT_READY` / `QUEUE_ERROR`）。

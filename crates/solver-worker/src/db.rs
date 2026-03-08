@@ -37,6 +37,9 @@ pub struct AppState {
     pub object_store: ObjectStoreClient,
 }
 
+const DEFAULT_ALL_UNIT_BATCH_SIZE: usize = 128;
+const MAX_ALL_UNIT_BATCH_SIZE: usize = 2_048;
+
 impl AppState {
     /// Creates app state with DB pool and required object storage.
     pub async fn new(config: &AppConfig) -> anyhow::Result<Self> {
@@ -657,9 +660,88 @@ pub async fn handle_job_payload(state: &AppState, payload: JobPayload) -> anyhow
             )?;
 
             let result_diag =
-                persist_solve_batch_result(state, job_id, snapshot_id, &solved).await?;
+                persist_solve_batch_result(state, job_id, snapshot_id, &solved, "solve_batch")
+                    .await?;
             let completed_diag = merge_job_status_update_timing(
                 serde_json::json!({"result": "stored", "storage": result_diag}),
+                "running",
+                running_db_write_sec,
+            );
+            let _ = update_job_status(&state.pool, job_id, "completed", completed_diag).await?;
+
+            if let Some(result_id) = latest_result_id_for_job(&state.pool, job_id).await?
+                && let Err(err) = mark_result_cache_ready(&state.pool, job_id, result_id).await
+            {
+                warn!(
+                    error = %err,
+                    job_id = %job_id,
+                    result_id = %result_id,
+                    "failed to mark result cache ready"
+                );
+            }
+        }
+        JobPayload::SolveAllUnit {
+            job_id,
+            snapshot_id,
+            solve,
+            unit_batch_size,
+            print_level,
+        } => {
+            let running_db_write_sec = update_job_status(
+                &state.pool,
+                job_id,
+                "running",
+                serde_json::json!({"phase": "solve_all_unit"}),
+            )
+            .await?;
+
+            if let Err(err) = mark_result_cache_running(&state.pool, job_id).await {
+                warn!(
+                    error = %err,
+                    job_id = %job_id,
+                    "failed to mark result cache running"
+                );
+            }
+
+            let level = print_level.unwrap_or(0.0);
+            ensure_prepared(state, snapshot_id, level).await?;
+            let process_count = fetch_snapshot_process_count(&state.pool, snapshot_id).await?;
+            let n = usize::try_from(process_count)
+                .map_err(|_| anyhow::anyhow!("process count overflow: {process_count}"))?;
+            if n == 0 {
+                return Err(anyhow::anyhow!(
+                    "solve_all_unit requires non-zero process count"
+                ));
+            }
+            let batch_size = normalize_all_unit_batch_size(unit_batch_size, n);
+            let solve_options = resolve_solve_all_unit_options(solve)?;
+
+            let mut items = Vec::with_capacity(n);
+            for start in (0..n).step_by(batch_size) {
+                let end = (start + batch_size).min(n);
+                let rhs_batch = build_all_unit_rhs_batch(n, start, end);
+                let partial = state.solver.solve_batch(
+                    snapshot_id,
+                    NumericOptions { print_level: level },
+                    rhs_batch.as_slice(),
+                    solve_options,
+                )?;
+                items.extend(partial.items);
+            }
+
+            let solved = SolveBatchResult { items };
+            let result_diag =
+                persist_solve_batch_result(state, job_id, snapshot_id, &solved, "solve_all_unit")
+                    .await?;
+            let completed_diag = merge_job_status_update_timing(
+                serde_json::json!({
+                    "result": "stored",
+                    "storage": result_diag,
+                    "solve_all_unit": {
+                        "process_count": n,
+                        "unit_batch_size": batch_size,
+                    }
+                }),
                 "running",
                 running_db_write_sec,
             );
@@ -765,6 +847,7 @@ async fn persist_solve_batch_result(
     job_id: Uuid,
     snapshot_id: Uuid,
     solved: &SolveBatchResult,
+    suffix: &'static str,
 ) -> anyhow::Result<Value> {
     let encode_started = Instant::now();
     let encoded = encode_solve_batch_artifact(snapshot_id, job_id, solved)?;
@@ -775,7 +858,7 @@ async fn persist_solve_batch_result(
         job_id,
         snapshot_id,
         PersistArtifactInput {
-            suffix: "solve_batch",
+            suffix,
             encoded,
             compute_timing: None,
             encode_artifact_sec,
@@ -936,6 +1019,63 @@ fn to_core_solve_options(solve: SolveOptionsPayload) -> SolveOptions {
     }
 }
 
+fn resolve_solve_all_unit_options(
+    solve: Option<SolveOptionsPayload>,
+) -> anyhow::Result<SolveOptions> {
+    let solve = solve.unwrap_or(SolveOptionsPayload {
+        return_x: false,
+        return_g: false,
+        return_h: true,
+    });
+    if solve.return_x || solve.return_g || !solve.return_h {
+        return Err(anyhow::anyhow!(
+            "solve_all_unit supports only solve={{return_x:false, return_g:false, return_h:true}}"
+        ));
+    }
+    Ok(to_core_solve_options(solve))
+}
+
+fn normalize_all_unit_batch_size(requested: Option<usize>, process_count: usize) -> usize {
+    if process_count == 0 {
+        return 1;
+    }
+    let requested = requested.unwrap_or(DEFAULT_ALL_UNIT_BATCH_SIZE);
+    requested.clamp(1, process_count.min(MAX_ALL_UNIT_BATCH_SIZE))
+}
+
+fn build_all_unit_rhs_batch(process_count: usize, start: usize, end: usize) -> Vec<Vec<f64>> {
+    let mut rhs_batch = Vec::with_capacity(end.saturating_sub(start));
+    for idx in start..end {
+        let mut rhs = vec![0.0; process_count];
+        rhs[idx] = 1.0;
+        rhs_batch.push(rhs);
+    }
+    rhs_batch
+}
+
+async fn fetch_snapshot_process_count(pool: &PgPool, snapshot_id: Uuid) -> anyhow::Result<i32> {
+    let row = sqlx::query(
+        r"
+        SELECT process_count
+        FROM lca_snapshot_artifacts
+        WHERE snapshot_id = $1
+          AND status = 'ready'
+        ORDER BY created_at DESC
+        LIMIT 1
+        ",
+    )
+    .bind(snapshot_id)
+    .fetch_optional(pool)
+    .await;
+
+    match row {
+        Ok(Some(row)) => Ok(row.try_get::<i32, _>("process_count")?),
+        Ok(None) => fetch_process_count(pool, snapshot_id).await,
+        Err(err) if is_undefined_table(&err) => fetch_process_count(pool, snapshot_id).await,
+        Err(err) => Err(err.into()),
+    }
+}
+
 async fn fetch_process_count(pool: &PgPool, snapshot_id: Uuid) -> anyhow::Result<i32> {
     let count: i64 = sqlx::query_scalar(
         r"
@@ -1002,3 +1142,46 @@ async fn fetch_triplets(
 
 #[allow(dead_code)]
 fn _assert_result_types(_a: SolveResult, _b: SolveBatchResult) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SolveOptionsPayload, build_all_unit_rhs_batch, normalize_all_unit_batch_size,
+        resolve_solve_all_unit_options,
+    };
+
+    #[test]
+    fn solve_all_unit_options_default_to_h_only() {
+        let options = resolve_solve_all_unit_options(None).expect("resolve options");
+        assert!(!options.return_x);
+        assert!(!options.return_g);
+        assert!(options.return_h);
+    }
+
+    #[test]
+    fn solve_all_unit_options_reject_large_payload_modes() {
+        let err = resolve_solve_all_unit_options(Some(SolveOptionsPayload {
+            return_x: true,
+            return_g: false,
+            return_h: true,
+        }))
+        .expect_err("expected invalid solve options");
+        assert!(err.to_string().contains("solve_all_unit supports only"));
+    }
+
+    #[test]
+    fn normalize_batch_size_clamps_to_safe_range() {
+        assert_eq!(normalize_all_unit_batch_size(None, 500), 128);
+        assert_eq!(normalize_all_unit_batch_size(Some(0), 500), 1);
+        assert_eq!(normalize_all_unit_batch_size(Some(9_999), 500), 500);
+    }
+
+    #[test]
+    fn build_rhs_batch_generates_unit_vectors() {
+        let batch = build_all_unit_rhs_batch(5, 1, 4);
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0], vec![0.0, 1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(batch[1], vec![0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(batch[2], vec![0.0, 0.0, 0.0, 1.0, 0.0]);
+    }
+}

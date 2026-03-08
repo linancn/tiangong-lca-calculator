@@ -11,7 +11,9 @@
 
 ## 2. 推荐交互流程
 
-1. 用户提交功能单位（目标 process + amount + solve 选项）。
+1. 用户提交求解模式：
+   - `single`：目标 process + amount + solve 选项
+   - `all_unit`：全量 process 的单位需求（`amount=1`）+ solve 选项（建议仅 `h`）
 2. 前端 `POST /lca/solve`（带 `X-Idempotency-Key`）。
 3. 根据返回模式处理：
    - `cache_hit`: 直接拉结果并渲染。
@@ -48,7 +50,7 @@
 每次用户点击“计算”前，生成稳定键：
 
 - 同一请求重复提交（网络重试、刷新）使用同一个 key。
-- 请求参数变化（process/amount/solve）必须生成新 key。
+- 请求参数变化（mode/process/amount/solve）必须生成新 key。
 
 可用方式：
 

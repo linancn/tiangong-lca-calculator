@@ -74,6 +74,7 @@ fn extract_job_id(payload: &JobPayload) -> uuid::Uuid {
         JobPayload::PrepareFactorization { job_id, .. }
         | JobPayload::SolveOne { job_id, .. }
         | JobPayload::SolveBatch { job_id, .. }
+        | JobPayload::SolveAllUnit { job_id, .. }
         | JobPayload::InvalidateFactorization { job_id, .. }
         | JobPayload::RebuildFactorization { job_id, .. } => *job_id,
     }

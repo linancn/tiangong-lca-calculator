@@ -66,6 +66,7 @@ Hard invariants:
   - `prepare_factorization`
   - `solve_one`
   - `solve_batch`
+  - `solve_all_unit` (worker-internal chunked unit demand across all processes)
   - `invalidate_factorization`
   - `rebuild_factorization`
 - updates `lca_jobs` status/diagnostics
@@ -176,6 +177,7 @@ Applied/expected migrations:
 - `20260305093000_lca_enqueue_job_rpc.sql`
 - `20260305094000_lca_enqueue_job_rpc_acl.sql`
 - `20260306090000_lca_results_s3_strict_and_retention.sql` (destructive for old results)
+- `20260308104000_lca_jobs_add_solve_all_unit.sql`
 
 Current runtime tables:
 

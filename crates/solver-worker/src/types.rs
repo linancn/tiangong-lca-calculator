@@ -48,6 +48,26 @@ pub enum JobPayload {
         #[serde(default)]
         print_level: Option<f64>,
     },
+    /// Solve unit demand for every process in current snapshot.
+    SolveAllUnit {
+        /// `jobs.id`
+        job_id: Uuid,
+        /// `lca_network_snapshots.id`
+        #[serde(alias = "model_version")]
+        snapshot_id: Uuid,
+        /// Output options.
+        ///
+        /// For `solve_all_unit`, worker enforces `return_h=true` and `return_x/return_g=false`
+        /// to avoid oversized artifacts.
+        #[serde(default)]
+        solve: Option<SolveOptionsPayload>,
+        /// Batch size for internal `solve_batch` chunks.
+        #[serde(default)]
+        unit_batch_size: Option<usize>,
+        /// Numeric print level.
+        #[serde(default)]
+        print_level: Option<f64>,
+    },
     /// Mark cached factorization stale.
     InvalidateFactorization {
         /// `jobs.id`
@@ -70,7 +90,7 @@ pub enum JobPayload {
 }
 
 /// Solve output flags from payload.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SolveOptionsPayload {
     /// Return x.
     pub return_x: bool,
@@ -118,7 +138,7 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::JobPayload;
+    use super::{JobPayload, SolveOptionsPayload};
 
     #[test]
     fn deserialize_prepare_payload() {
@@ -143,5 +163,60 @@ mod tests {
 
         let parsed: JobPayload = serde_json::from_value(payload).expect("parse payload");
         assert!(matches!(parsed, JobPayload::PrepareFactorization { .. }));
+    }
+
+    #[test]
+    fn deserialize_solve_all_unit_payload_defaults() {
+        let payload = json!({
+            "type": "solve_all_unit",
+            "job_id": Uuid::nil(),
+            "snapshot_id": Uuid::nil()
+        });
+        let parsed: JobPayload = serde_json::from_value(payload).expect("parse payload");
+        match parsed {
+            JobPayload::SolveAllUnit {
+                unit_batch_size,
+                solve,
+                ..
+            } => {
+                assert!(unit_batch_size.is_none());
+                assert!(solve.is_none());
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_solve_all_unit_payload_with_options() {
+        let payload = json!({
+            "type": "solve_all_unit",
+            "job_id": Uuid::nil(),
+            "snapshot_id": Uuid::nil(),
+            "unit_batch_size": 256,
+            "solve": {
+                "return_x": false,
+                "return_g": false,
+                "return_h": true
+            }
+        });
+        let parsed: JobPayload = serde_json::from_value(payload).expect("parse payload");
+        match parsed {
+            JobPayload::SolveAllUnit {
+                unit_batch_size,
+                solve,
+                ..
+            } => {
+                assert_eq!(unit_batch_size, Some(256));
+                assert_eq!(
+                    solve,
+                    Some(SolveOptionsPayload {
+                        return_x: false,
+                        return_g: false,
+                        return_h: true,
+                    })
+                );
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
     }
 }

@@ -27,6 +27,7 @@
   - `prepare_factorization`
   - `solve_one`
   - `solve_batch`
+  - `solve_all_unit`
   - `invalidate_factorization`
   - `rebuild_factorization`
 - 已完成 additive schema：
@@ -74,6 +75,7 @@ worker 上传 artifact 到 S3 兼容存储，并在 `lca_results` 中写入：
 - `supabase/migrations/20260305093000_lca_enqueue_job_rpc.sql`（新增 `public.lca_enqueue_job` RPC，供 Edge Functions 通过 supabase.rpc 入队）
 - `supabase/migrations/20260305094000_lca_enqueue_job_rpc_acl.sql`（收紧 RPC 权限，仅 `service_role` 可执行）
 - `supabase/migrations/20260306090000_lca_results_s3_strict_and_retention.sql`（破坏性：清理旧结果并切换为 S3-only + retention 字段）
+- `supabase/migrations/20260308104000_lca_jobs_add_solve_all_unit.sql`（扩展 `lca_jobs.job_type` 约束，支持 `solve_all_unit`）
 
 对已有业务源表（`processes/flows/lciamethods/...`）不做修改。
 其中 `20260304120000` 会删除旧的 `lca_*_entries/index` 中间表，只保留 artifact-first 所需表。
@@ -92,6 +94,7 @@ worker 上传 artifact 到 S3 兼容存储，并在 `lca_results` 中写入：
 ./scripts/validate_additive_migration.sh supabase/migrations/20260305093000_lca_enqueue_job_rpc.sql
 ./scripts/validate_additive_migration.sh supabase/migrations/20260305094000_lca_enqueue_job_rpc_acl.sql
 ./scripts/validate_additive_migration.sh supabase/migrations/20260306090000_lca_results_s3_strict_and_retention.sql
+./scripts/validate_additive_migration.sh supabase/migrations/20260308104000_lca_jobs_add_solve_all_unit.sql
 ```
 
 执行迁移：
@@ -106,6 +109,7 @@ psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260305070000_lca_rls_lo
 psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260305093000_lca_enqueue_job_rpc.sql
 psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260305094000_lca_enqueue_job_rpc_acl.sql
 psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260306090000_lca_results_s3_strict_and_retention.sql
+psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260308104000_lca_jobs_add_solve_all_unit.sql
 ```
 
 ### 4.0.1 访问控制基线（RLS）

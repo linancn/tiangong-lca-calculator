@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{error, info, instrument, warn};
+use uuid::Uuid;
 
 use crate::{
     db::{
-        AppState, archive_queue_message, handle_job_payload, mark_result_cache_failed,
-        read_one_queue_message, update_job_status,
+        archive_queue_message, handle_job_payload, mark_result_cache_failed,
+        read_one_queue_message, update_job_status, AppState,
     },
     types::JobPayload,
 };
@@ -49,6 +51,23 @@ pub async fn run_worker_loop(
                     }
                     Err(err) => {
                         warn!(error = %err, "invalid job payload");
+                        if let Some(job_id) = extract_job_id_from_raw_payload(&message.payload) {
+                            let err_message = format!("invalid job payload: {err}");
+                            let _ = update_job_status(
+                                &state.pool,
+                                job_id,
+                                "failed",
+                                serde_json::json!({"error": err_message}),
+                            )
+                            .await;
+                            let _ = mark_result_cache_failed(
+                                &state.pool,
+                                job_id,
+                                "invalid_job_payload",
+                                &err_message,
+                            )
+                            .await;
+                        }
                     }
                 }
 
@@ -76,6 +95,14 @@ fn extract_job_id(payload: &JobPayload) -> uuid::Uuid {
         | JobPayload::SolveBatch { job_id, .. }
         | JobPayload::SolveAllUnit { job_id, .. }
         | JobPayload::InvalidateFactorization { job_id, .. }
-        | JobPayload::RebuildFactorization { job_id, .. } => *job_id,
+        | JobPayload::RebuildFactorization { job_id, .. }
+        | JobPayload::BuildSnapshot { job_id, .. } => *job_id,
     }
+}
+
+fn extract_job_id_from_raw_payload(payload: &Value) -> Option<Uuid> {
+    payload
+        .get("job_id")
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
 }

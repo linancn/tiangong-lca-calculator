@@ -307,7 +307,77 @@ set -a && source .env && set +a
 cargo run -p solver-worker --bin solver-worker --release -- --mode worker
 ```
 
-### 6.2 生产常驻（systemd，推荐）
+### 6.2 计算正确性基线流程（Expected 对比）
+
+`bw25-validator` 适合做“同一 snapshot 下的数值交叉验证”；若要在数据反复变更后持续验收，建议使用“手动 expected 基线 + API 对比”流程。
+
+核心脚本：
+
+- `scripts/generate_lcia_expected.sh`：从 snapshot artifact 直接解方程，生成 `expected` TSV。
+- `scripts/validate_lcia_targets.sh`：调用 `lca_query_results`，将实际值与 `expected` TSV 对比。
+
+#### 6.2.1 准备 process 列表
+
+创建一个仅含 `process_id` 的文件（可带表头，第一列必须是 `process_id`）：
+
+```tsv
+process_id
+<uuid-1>
+<uuid-2>
+...
+```
+
+#### 6.2.2 生成 expected 基线
+
+默认 impact 是 GWP（`6209b35f-9447-40b5-b68c-a1099e3674a0`）。可通过 `--impact-id` 覆盖。
+
+```bash
+./scripts/generate_lcia_expected.sh \
+  --snapshot-id <snapshot_id> \
+  --process-ids-file reports/lcia-targets/<process-list>.tsv \
+  --output reports/lcia-targets/<expected>.tsv \
+  --include-process-name
+```
+
+输出列：
+
+- `process_id`
+- `expected_value`
+- `abs_tol`
+- `process_index`
+- `direct_value`
+- `indirect_value`
+- `process_name`（仅 `--include-process-name`）
+
+#### 6.2.3 对比当前 API 结果
+
+```bash
+USER_API_KEY=<base64-email-password> \
+./scripts/validate_lcia_targets.sh \
+  --snapshot-id <snapshot_id> \
+  --expected reports/lcia-targets/<expected>.tsv \
+  --out reports/lcia-targets/<compare>.tsv
+```
+
+通过标准：
+
+- 全部 `pass=true`
+- 任一条超出 `abs_tol` 则脚本退出码为 `3`
+
+#### 6.2.4 推荐复用方式
+
+当 process/flow/lcia 数据变更后，重复以下三步：
+
+1. 重新构建 snapshot（建议记录新的 `snapshot_id`）。
+2. 用 `generate_lcia_expected.sh` 生成新的 expected 文件（建议带日期后缀）。
+3. 用 `validate_lcia_targets.sh` 对比并留存 compare 报告。
+
+说明：
+
+- 如果 expected 来自当前 snapshot 的手动求解，它是“回归基线验证”（保证实现一致性）。
+- 如果 expected 来自外部审定结果，它可用于“绝对准确性验证”。
+
+### 6.3 生产常驻（systemd，推荐）
 
 `cargo run` 适合开发调试。生产环境建议使用 `systemd` 托管 `release` 二进制（开机自启、崩溃自恢复、统一日志）。
 

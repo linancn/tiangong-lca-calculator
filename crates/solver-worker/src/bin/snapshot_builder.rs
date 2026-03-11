@@ -919,6 +919,17 @@ async fn load_impact_factor_sets(
     Ok(out)
 }
 
+fn add_technosphere_edge(
+    a_map: &mut HashMap<(i32, i32), f64>,
+    provider_idx: i32,
+    consumer_idx: i32,
+    amount: f64,
+) {
+    if amount.abs() > f64::EPSILON {
+        *a_map.entry((provider_idx, consumer_idx)).or_insert(0.0) += amount;
+    }
+}
+
 async fn build_sparse_payload(
     pool: &PgPool,
     snapshot_id: Uuid,
@@ -1139,7 +1150,9 @@ async fn build_sparse_payload(
             let provider_idx = *providers
                 .and_then(|vec| vec.first())
                 .ok_or_else(|| anyhow::anyhow!("missing provider idx"))?;
-            *a_map.entry((ex.process_idx, provider_idx)).or_insert(0.0) += amount;
+            // A is stored as provider(row) -> consumer(col), so M = I - A
+            // propagates demand from downstream to upstream with x = (I - A)^-1 y.
+            add_technosphere_edge(&mut a_map, provider_idx, ex.process_idx, amount);
         } else if provider_cnt > 1 {
             matched_multi += 1;
             let resolution = resolve_multi_provider(
@@ -1156,9 +1169,7 @@ async fn build_sparse_payload(
                 a_input_edges_written += 1;
                 for (provider_idx, weight) in resolution.allocations {
                     let weighted = amount * weight;
-                    if weighted.abs() > f64::EPSILON {
-                        *a_map.entry((ex.process_idx, provider_idx)).or_insert(0.0) += weighted;
-                    }
+                    add_technosphere_edge(&mut a_map, provider_idx, ex.process_idx, weighted);
                 }
             } else {
                 matched_multi_unresolved += 1;
@@ -2782,10 +2793,12 @@ fn write_report_files(
 mod tests {
     use super::{
         AllocationMode, ExchangeDirection, NormalizationMode, ParsedExchange, ProcessMeta,
-        ProviderRule, biosphere_gross_value, geo_score, resolve_allocation_fraction,
-        resolve_multi_provider, resolve_reference_normalization, time_score,
+        ProviderRule, add_technosphere_edge, biosphere_gross_value, geo_score,
+        resolve_allocation_fraction, resolve_multi_provider, resolve_reference_normalization,
+        time_score,
     };
     use serde_json::json;
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     fn assert_close(actual: f64, expected: f64) {
@@ -2794,6 +2807,15 @@ mod tests {
             delta <= 1e-12,
             "expected {expected}, got {actual}, delta={delta}"
         );
+    }
+
+    #[test]
+    fn technosphere_edge_is_provider_to_consumer() {
+        let mut a_map: HashMap<(i32, i32), f64> = HashMap::new();
+        add_technosphere_edge(&mut a_map, 10, 20, 0.4);
+
+        assert_close(*a_map.get(&(10, 20)).expect("provider->consumer"), 0.4);
+        assert!(a_map.get(&(20, 10)).is_none());
     }
 
     #[test]

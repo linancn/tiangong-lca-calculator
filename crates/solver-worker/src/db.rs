@@ -11,11 +11,14 @@ use uuid::Uuid;
 
 use crate::{
     artifacts::{
-        EncodedArtifact, encode_solve_all_unit_query_artifact, encode_solve_batch_artifact,
+        EncodedArtifact, encode_contribution_path_artifact,
+        encode_solve_all_unit_query_artifact, encode_solve_batch_artifact,
         encode_solve_one_artifact,
     },
     config::AppConfig,
+    contribution_path::{ContributionPathArtifact, analyze_contribution_path},
     snapshot_artifacts::decode_snapshot_artifact,
+    snapshot_index::{SnapshotIndexDocument, derive_snapshot_index_url},
     storage::ObjectStoreClient,
     types::{JobPayload, SolveOptionsPayload},
 };
@@ -536,6 +539,29 @@ async fn fetch_snapshot_payload_from_artifact(
     Ok(decoded.payload)
 }
 
+async fn fetch_snapshot_index_document(
+    state: &AppState,
+    snapshot_id: Uuid,
+) -> anyhow::Result<SnapshotIndexDocument> {
+    let meta = fetch_snapshot_artifact_meta(&state.pool, snapshot_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("snapshot {snapshot_id} has no ready artifact"))?;
+    let snapshot_index_url = derive_snapshot_index_url(&meta.artifact_url);
+    let bytes = state
+        .object_store
+        .download_object_url(&snapshot_index_url)
+        .await?;
+    let decoded: SnapshotIndexDocument = serde_json::from_slice(bytes.as_slice())?;
+    if decoded.snapshot_id != snapshot_id {
+        return Err(anyhow::anyhow!(
+            "snapshot index mismatch: expected={} got={}",
+            snapshot_id,
+            decoded.snapshot_id
+        ));
+    }
+    Ok(decoded)
+}
+
 fn is_undefined_table(err: &sqlx::Error) -> bool {
     match err {
         sqlx::Error::Database(db_err) => db_err.code().as_deref() == Some("42P01"),
@@ -793,6 +819,116 @@ pub async fn handle_job_payload(state: &AppState, payload: JobPayload) -> anyhow
                 }
             }
         }
+        JobPayload::AnalyzeContributionPath {
+            job_id,
+            snapshot_id,
+            process_id,
+            process_index,
+            impact_id,
+            impact_index,
+            amount,
+            options,
+            print_level,
+        } => {
+            let running_db_write_sec = update_job_status(
+                &state.pool,
+                job_id,
+                "running",
+                serde_json::json!({"phase": "analyze_contribution_path"}),
+            )
+            .await?;
+
+            if let Err(err) = mark_result_cache_running(&state.pool, job_id).await {
+                warn!(
+                    error = %err,
+                    job_id = %job_id,
+                    "failed to mark result cache running"
+                );
+            }
+
+            if !amount.is_finite() || amount == 0.0 {
+                return Err(anyhow::anyhow!(
+                    "analyze_contribution_path requires finite non-zero amount"
+                ));
+            }
+
+            let level = print_level.unwrap_or(0.0);
+            ensure_prepared(state, snapshot_id, level).await?;
+            let snapshot_data = fetch_snapshot_sparse_data(state, snapshot_id).await?;
+            let snapshot_index = fetch_snapshot_index_document(state, snapshot_id).await?;
+            let process_count = usize::try_from(snapshot_data.process_count)
+                .map_err(|_| anyhow::anyhow!("process count overflow"))?;
+            let root_process_index = usize::try_from(process_index)
+                .map_err(|_| anyhow::anyhow!("process_index overflow: {process_index}"))?;
+            if root_process_index >= process_count {
+                return Err(anyhow::anyhow!(
+                    "process_index out of range: process_index={process_index} process_count={process_count}"
+                ));
+            }
+            let impact_count = usize::try_from(snapshot_data.impact_count)
+                .map_err(|_| anyhow::anyhow!("impact count overflow"))?;
+            let target_impact_index = usize::try_from(impact_index)
+                .map_err(|_| anyhow::anyhow!("impact_index overflow: {impact_index}"))?;
+            if target_impact_index >= impact_count {
+                return Err(anyhow::anyhow!(
+                    "impact_index out of range: impact_index={impact_index} impact_count={impact_count}"
+                ));
+            }
+
+            let rhs = build_single_rhs(process_count, root_process_index, amount);
+            let timed = state.solver.solve_one_timed(
+                snapshot_id,
+                NumericOptions { print_level: level },
+                &rhs,
+                SolveOptions {
+                    return_x: true,
+                    return_g: true,
+                    return_h: true,
+                },
+            )?;
+            let analysis = analyze_contribution_path(
+                snapshot_id,
+                job_id,
+                process_id,
+                impact_id,
+                process_index,
+                impact_index,
+                amount,
+                options,
+                &snapshot_index,
+                &snapshot_data,
+                &timed.result,
+            )?;
+
+            let result_diag =
+                persist_contribution_path_result(state, job_id, snapshot_id, &analysis).await?;
+            let completed_diag = merge_job_status_update_timing(
+                serde_json::json!({
+                    "result": "stored",
+                    "storage": result_diag,
+                    "contribution_path": {
+                        "process_id": process_id,
+                        "impact_id": impact_id,
+                        "amount": amount,
+                        "summary": analysis.summary,
+                    }
+                }),
+                "running",
+                running_db_write_sec,
+            );
+            let _ = update_job_status(&state.pool, job_id, "completed", completed_diag).await?;
+
+            if let Some(result_id) = latest_result_id_for_job(&state.pool, job_id).await?
+                && let Err(err) = mark_result_cache_ready(&state.pool, job_id, result_id).await
+            {
+                warn!(
+                    error = %err,
+                    job_id = %job_id,
+                    result_id = %result_id,
+                    "failed to mark result cache ready"
+                );
+            }
+        }
         JobPayload::InvalidateFactorization {
             job_id,
             snapshot_id,
@@ -997,6 +1133,27 @@ async fn persist_solve_all_unit_query_artifact(
         byte_size: artifact_len,
         format: encoded.format.to_owned(),
     })
+}
+
+async fn persist_contribution_path_result(
+    state: &AppState,
+    job_id: Uuid,
+    snapshot_id: Uuid,
+    analysis: &ContributionPathArtifact,
+) -> anyhow::Result<Value> {
+    let encoded = encode_contribution_path_artifact(analysis)?;
+    persist_result_artifact(
+        state,
+        job_id,
+        snapshot_id,
+        PersistArtifactInput {
+            suffix: "contribution_path",
+            encoded,
+            compute_timing: None,
+            encode_artifact_sec: 0.0,
+        },
+    )
+    .await
 }
 
 async fn upsert_latest_all_unit_result(
@@ -1482,6 +1639,12 @@ fn build_all_unit_rhs_batch(process_count: usize, start: usize, end: usize) -> V
         rhs_batch.push(rhs);
     }
     rhs_batch
+}
+
+fn build_single_rhs(process_count: usize, process_index: usize, amount: f64) -> Vec<f64> {
+    let mut rhs = vec![0.0; process_count];
+    rhs[process_index] = amount;
+    rhs
 }
 
 async fn fetch_snapshot_process_count(pool: &PgPool, snapshot_id: Uuid) -> anyhow::Result<i32> {

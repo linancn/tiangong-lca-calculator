@@ -7,6 +7,8 @@ use solver_core::{SolveBatchResult, SolveResult};
 use tempfile::Builder;
 use uuid::Uuid;
 
+use crate::contribution_path::ContributionPathArtifact;
+
 const SCHEMA_VERSION: u8 = 1;
 const DATASET_SCHEMA_VERSION: &str = "schema_version";
 const DATASET_FORMAT: &str = "format";
@@ -26,6 +28,12 @@ pub const ALL_UNIT_QUERY_ARTIFACT_FORMAT: &str = "all-unit-query:v1";
 pub const ALL_UNIT_QUERY_ARTIFACT_EXTENSION: &str = "json";
 /// MIME type for query sidecar artifacts.
 pub const ALL_UNIT_QUERY_ARTIFACT_CONTENT_TYPE: &str = "application/json";
+/// Query-friendly JSON artifact for contribution path analysis.
+pub const CONTRIBUTION_PATH_ARTIFACT_FORMAT: &str = "contribution-path:v1";
+/// File extension for contribution path artifacts.
+pub const CONTRIBUTION_PATH_ARTIFACT_EXTENSION: &str = "json";
+/// MIME type for contribution path artifacts.
+pub const CONTRIBUTION_PATH_ARTIFACT_CONTENT_TYPE: &str = "application/json";
 
 #[derive(Debug, Clone, Serialize)]
 struct ArtifactEnvelope<T>
@@ -147,6 +155,18 @@ pub fn encode_solve_all_unit_query_artifact(
     })
 }
 
+/// Encodes one contribution path result into a query-friendly JSON artifact.
+pub fn encode_contribution_path_artifact(
+    result: &ContributionPathArtifact,
+) -> anyhow::Result<EncodedArtifact> {
+    encode_json_artifact(
+        result,
+        CONTRIBUTION_PATH_ARTIFACT_FORMAT,
+        CONTRIBUTION_PATH_ARTIFACT_CONTENT_TYPE,
+        CONTRIBUTION_PATH_ARTIFACT_EXTENSION,
+    )
+}
+
 fn encode<T>(value: &T) -> anyhow::Result<EncodedArtifact>
 where
     T: Serialize,
@@ -170,6 +190,29 @@ where
         format: ARTIFACT_FORMAT,
         content_type: ARTIFACT_CONTENT_TYPE,
         extension: ARTIFACT_EXTENSION,
+    })
+}
+
+fn encode_json_artifact<T>(
+    value: &T,
+    format: &'static str,
+    content_type: &'static str,
+    extension: &'static str,
+) -> anyhow::Result<EncodedArtifact>
+where
+    T: Serialize,
+{
+    let bytes = serde_json::to_vec(value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes.as_slice());
+    let digest = format!("{:x}", hasher.finalize());
+
+    Ok(EncodedArtifact {
+        bytes,
+        sha256: digest,
+        format,
+        content_type,
+        extension,
     })
 }
 
@@ -207,10 +250,17 @@ mod tests {
     use tempfile::Builder;
     use uuid::Uuid;
 
+    use crate::contribution_path::{
+        ContributionPathArtifact, ContributionPathImpact, ContributionPathMeta,
+        ContributionPathOptions, ContributionPathRoot, ContributionPathSummary,
+    };
+
     use super::{
-        ARTIFACT_CONTENT_TYPE, ARTIFACT_EXTENSION, ARTIFACT_FORMAT, DATASET_ENVELOPE_JSON,
-        DATASET_FORMAT, DATASET_SCHEMA_VERSION, HDF5_DEFLATE_LEVEL, encode_solve_batch_artifact,
-        encode_solve_one_artifact,
+        ARTIFACT_CONTENT_TYPE, ARTIFACT_EXTENSION, ARTIFACT_FORMAT,
+        CONTRIBUTION_PATH_ARTIFACT_CONTENT_TYPE, CONTRIBUTION_PATH_ARTIFACT_EXTENSION,
+        CONTRIBUTION_PATH_ARTIFACT_FORMAT, DATASET_ENVELOPE_JSON, DATASET_FORMAT,
+        DATASET_SCHEMA_VERSION, HDF5_DEFLATE_LEVEL, encode_contribution_path_artifact,
+        encode_solve_batch_artifact, encode_solve_one_artifact,
     };
 
     #[derive(Debug, Deserialize)]
@@ -329,6 +379,54 @@ mod tests {
         assert!(
             (envelope.payload.items[0].h.as_ref().expect("h exists")[0] - 2.0).abs() < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn encode_contribution_path_artifact_as_json() {
+        let artifact = ContributionPathArtifact {
+            version: 1,
+            format: CONTRIBUTION_PATH_ARTIFACT_FORMAT.to_owned(),
+            snapshot_id: Uuid::nil(),
+            job_id: Uuid::nil(),
+            process_id: Uuid::nil(),
+            impact_id: Uuid::nil(),
+            amount: 1.0,
+            options: ContributionPathOptions::default(),
+            summary: ContributionPathSummary {
+                total_impact: 1.23,
+                unit: "kg CO2-eq".to_owned(),
+                coverage_ratio: 0.9,
+                expanded_node_count: 3,
+                truncated_node_count: 1,
+                computed_at: "2026-03-13T00:00:00Z".to_owned(),
+            },
+            root: ContributionPathRoot {
+                process_id: Uuid::nil(),
+                label: "Root".to_owned(),
+            },
+            impact: ContributionPathImpact {
+                impact_id: Uuid::nil(),
+                label: "GWP".to_owned(),
+                unit: "kg CO2-eq".to_owned(),
+            },
+            process_contributions: Vec::new(),
+            branches: Vec::new(),
+            links: Vec::new(),
+            meta: ContributionPathMeta {
+                source: "solve_one_path_analysis".to_owned(),
+                snapshot_index_version: 1,
+            },
+        };
+
+        let encoded = encode_contribution_path_artifact(&artifact).expect("encode json artifact");
+        assert_eq!(encoded.format, CONTRIBUTION_PATH_ARTIFACT_FORMAT);
+        assert_eq!(encoded.content_type, CONTRIBUTION_PATH_ARTIFACT_CONTENT_TYPE);
+        assert_eq!(encoded.extension, CONTRIBUTION_PATH_ARTIFACT_EXTENSION);
+
+        let decoded: ContributionPathArtifact =
+            serde_json::from_slice(encoded.bytes.as_slice()).expect("decode json artifact");
+        assert_eq!(decoded.summary.total_impact, 1.23);
+        assert_eq!(decoded.root.label, "Root");
     }
 
     fn write_and_open_hdf5(bytes: &[u8]) -> File {

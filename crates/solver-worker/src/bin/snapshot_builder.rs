@@ -22,6 +22,9 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use solver_core::{ModelSparseData, SparseTriplet};
+use solver_worker::snapshot_index::{
+    SnapshotImpactMapEntry, SnapshotIndexDocument, SnapshotProcessMapEntry,
+};
 use solver_worker::snapshot_artifacts::{
     SNAPSHOT_ARTIFACT_FORMAT, SnapshotAllocationCoverage, SnapshotBuildConfig,
     SnapshotCoverageReport, SnapshotMatchingCoverage, SnapshotMatrixScale,
@@ -128,6 +131,7 @@ struct ProcessMeta {
     process_idx: i32,
     process_id: Uuid,
     process_version: String,
+    process_name: Option<String>,
     model_id: Option<Uuid>,
     location: Option<String>,
     reference_year: Option<i32>,
@@ -180,32 +184,6 @@ struct BuildOutput {
     data: ModelSparseData,
     coverage: SnapshotCoverageReport,
     snapshot_index: SnapshotIndexDocument,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SnapshotIndexDocument {
-    version: u8,
-    snapshot_id: Uuid,
-    process_count: i32,
-    impact_count: i32,
-    process_map: Vec<SnapshotProcessMapEntry>,
-    impact_map: Vec<SnapshotImpactMapEntry>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SnapshotProcessMapEntry {
-    process_id: Uuid,
-    process_index: i32,
-    process_version: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SnapshotImpactMapEntry {
-    impact_id: Uuid,
-    impact_index: i32,
-    impact_key: String,
-    impact_name: String,
-    unit: String,
 }
 
 type ParsedProcessChunk = (
@@ -971,6 +949,7 @@ async fn build_sparse_payload(
                 process_idx,
                 process_id: proc_row.id,
                 process_version: proc_row.version.clone(),
+                process_name: parse_process_name(&proc_row.json),
                 model_id: proc_row.model_id,
                 location: parse_process_location(&proc_row.json),
                 reference_year: parse_process_reference_year(&proc_row.json),
@@ -1358,6 +1337,8 @@ async fn build_sparse_payload(
             process_id: meta.process_id,
             process_index: meta.process_idx,
             process_version: meta.process_version.clone(),
+            process_name: meta.process_name.clone(),
+            location: meta.location.clone(),
         })
         .collect::<Vec<_>>();
     let impact_map = build_snapshot_impact_map(snapshot_id, method, impact_factor_sets)?;
@@ -2238,6 +2219,25 @@ fn parse_process_location(process_json: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn parse_process_name(process_json: &Value) -> Option<String> {
+    process_json
+        .get("processDataSet")
+        .and_then(|v| v.get("processInformation"))
+        .and_then(|v| v.get("dataSetInformation"))
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.get("baseName"))
+        .and_then(|v| match v {
+            Value::Array(items) => items.first(),
+            Value::Object(_) => Some(v),
+            _ => None,
+        })
+        .and_then(|v| v.get("#text").or(Some(v)))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn parse_process_reference_year(process_json: &Value) -> Option<i32> {
     let value = process_json
         .get("processDataSet")
@@ -2865,6 +2865,7 @@ mod tests {
                 process_idx: 0,
                 process_id: Uuid::new_v4(),
                 process_version: "01.00.000".to_owned(),
+                process_name: None,
                 model_id: None,
                 location: Some("CN-BJ".to_owned()),
                 reference_year: Some(2026),
@@ -2873,6 +2874,7 @@ mod tests {
                 process_idx: 1,
                 process_id: Uuid::new_v4(),
                 process_version: "01.00.000".to_owned(),
+                process_name: None,
                 model_id: None,
                 location: Some("CN-BJ".to_owned()),
                 reference_year: Some(2026),
@@ -2881,6 +2883,7 @@ mod tests {
                 process_idx: 2,
                 process_id: Uuid::new_v4(),
                 process_version: "01.00.000".to_owned(),
+                process_name: None,
                 model_id: None,
                 location: Some("GLO".to_owned()),
                 reference_year: Some(2010),
@@ -2915,6 +2918,7 @@ mod tests {
                 process_idx: 0,
                 process_id: Uuid::new_v4(),
                 process_version: "01.00.000".to_owned(),
+                process_name: None,
                 model_id: Some(model_consumer),
                 location: Some("CN-BJ".to_owned()),
                 reference_year: Some(2026),
@@ -2923,6 +2927,7 @@ mod tests {
                 process_idx: 1,
                 process_id: Uuid::new_v4(),
                 process_version: "01.00.000".to_owned(),
+                process_name: None,
                 model_id: Some(model_consumer),
                 location: Some("CN".to_owned()),
                 reference_year: Some(2024),
@@ -2931,6 +2936,7 @@ mod tests {
                 process_idx: 2,
                 process_id: Uuid::new_v4(),
                 process_version: "01.00.000".to_owned(),
+                process_name: None,
                 model_id: Some(model_other),
                 location: Some("CN-BJ".to_owned()),
                 reference_year: Some(2026),

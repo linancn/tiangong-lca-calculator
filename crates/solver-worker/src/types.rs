@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::contribution_path::ContributionPathOptions;
+
 /// Queue payload for worker jobs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -68,6 +70,31 @@ pub enum JobPayload {
         #[serde(default)]
         print_level: Option<f64>,
     },
+    /// Analyze one process + one impact into a contribution path result.
+    AnalyzeContributionPath {
+        /// `jobs.id`
+        job_id: Uuid,
+        /// `lca_network_snapshots.id`
+        #[serde(alias = "model_version")]
+        snapshot_id: Uuid,
+        /// Root process business id.
+        process_id: Uuid,
+        /// Root process index inside snapshot matrices.
+        process_index: i32,
+        /// Target impact business id.
+        impact_id: Uuid,
+        /// Target impact index inside `C` and `h`.
+        impact_index: i32,
+        /// Root demand amount.
+        #[serde(default = "default_amount")]
+        amount: f64,
+        /// Traversal options.
+        #[serde(default)]
+        options: ContributionPathOptions,
+        /// Numeric print level.
+        #[serde(default)]
+        print_level: Option<f64>,
+    },
     /// Mark cached factorization stale.
     InvalidateFactorization {
         /// `jobs.id`
@@ -130,6 +157,10 @@ pub enum JobPayload {
         #[serde(default)]
         no_lcia: Option<bool>,
     },
+}
+
+fn default_amount() -> f64 {
+    1.0
 }
 
 /// Solve output flags from payload.
@@ -258,6 +289,42 @@ mod tests {
                         return_h: true,
                     })
                 );
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_contribution_path_payload_defaults() {
+        let process_id = Uuid::new_v4();
+        let impact_id = Uuid::new_v4();
+        let payload = json!({
+            "type": "analyze_contribution_path",
+            "job_id": Uuid::nil(),
+            "snapshot_id": Uuid::nil(),
+            "process_id": process_id,
+            "process_index": 12,
+            "impact_id": impact_id,
+            "impact_index": 3
+        });
+
+        let parsed: JobPayload = serde_json::from_value(payload).expect("parse payload");
+        match parsed {
+            JobPayload::AnalyzeContributionPath {
+                process_id: parsed_process_id,
+                process_index,
+                impact_id: parsed_impact_id,
+                impact_index,
+                amount,
+                options,
+                ..
+            } => {
+                assert_eq!(parsed_process_id, process_id);
+                assert_eq!(process_index, 12);
+                assert_eq!(parsed_impact_id, impact_id);
+                assert_eq!(impact_index, 3);
+                assert_eq!(amount, 1.0);
+                assert_eq!(options, super::ContributionPathOptions::default());
             }
             other => panic!("unexpected payload: {other:?}"),
         }

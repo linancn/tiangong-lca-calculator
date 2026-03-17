@@ -420,7 +420,10 @@ mod tests {
 
         let encoded = encode_contribution_path_artifact(&artifact).expect("encode json artifact");
         assert_eq!(encoded.format, CONTRIBUTION_PATH_ARTIFACT_FORMAT);
-        assert_eq!(encoded.content_type, CONTRIBUTION_PATH_ARTIFACT_CONTENT_TYPE);
+        assert_eq!(
+            encoded.content_type,
+            CONTRIBUTION_PATH_ARTIFACT_CONTENT_TYPE
+        );
         assert_eq!(encoded.extension, CONTRIBUTION_PATH_ARTIFACT_EXTENSION);
 
         let decoded: ContributionPathArtifact =

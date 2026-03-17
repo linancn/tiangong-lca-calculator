@@ -420,10 +420,11 @@ fn traverse_upstream(
     let mut path = vec![root_process_index];
     state.walk(root_process_index, 0, &mut path)?;
     state.branches.sort_by(|left, right| {
-        right
-            .path_score
-            .total_cmp(&left.path_score)
-            .then_with(|| left.path_labels.join(" > ").cmp(&right.path_labels.join(" > ")))
+        right.path_score.total_cmp(&left.path_score).then_with(|| {
+            left.path_labels
+                .join(" > ")
+                .cmp(&right.path_labels.join(" > "))
+        })
     });
     for (rank, branch) in state.branches.iter_mut().enumerate() {
         branch.rank = rank + 1;
@@ -452,7 +453,12 @@ struct TraversalState<'a> {
 }
 
 impl TraversalState<'_> {
-    fn walk(&mut self, current_process_index: i32, depth: usize, path: &mut Vec<i32>) -> anyhow::Result<()> {
+    fn walk(
+        &mut self,
+        current_process_index: i32,
+        depth: usize,
+        path: &mut Vec<i32>,
+    ) -> anyhow::Result<()> {
         if depth >= self.options.max_depth {
             self.truncated_node_count += 1;
             self.record_branch(path, "max_depth")?;
@@ -461,10 +467,9 @@ impl TraversalState<'_> {
 
         let providers = self
             .adjacency
-            .get(
-                usize::try_from(current_process_index)
-                    .map_err(|_| anyhow::anyhow!("current process index overflow: {current_process_index}"))?,
-            )
+            .get(usize::try_from(current_process_index).map_err(|_| {
+                anyhow::anyhow!("current process index overflow: {current_process_index}")
+            })?)
             .ok_or_else(|| anyhow::anyhow!("current process index missing from adjacency"))?;
 
         if providers.is_empty() {
@@ -498,7 +503,9 @@ impl TraversalState<'_> {
         });
 
         let mut expanded_any = false;
-        for (position, (provider_idx, direct_impact, share_of_total)) in ranked.iter().copied().enumerate() {
+        for (position, (provider_idx, direct_impact, share_of_total)) in
+            ranked.iter().copied().enumerate()
+        {
             if position >= self.options.top_k_children {
                 self.truncated_node_count += 1;
                 continue;
@@ -507,7 +514,9 @@ impl TraversalState<'_> {
             let target_meta = self
                 .process_meta_by_index
                 .get(&provider_idx)
-                .ok_or_else(|| anyhow::anyhow!("provider {provider_idx} missing from snapshot index"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("provider {provider_idx} missing from snapshot index")
+                })?;
 
             if path.contains(&provider_idx) {
                 self.links.push(ContributionPathLink {
@@ -594,14 +603,18 @@ impl TraversalState<'_> {
         self.process_meta_by_index
             .get(&process_index)
             .map(|entry| entry.process_id)
-            .ok_or_else(|| anyhow::anyhow!("process_index missing from snapshot index: {process_index}"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("process_index missing from snapshot index: {process_index}")
+            })
     }
 
     fn label_for_index(&self, process_index: i32) -> anyhow::Result<String> {
         let entry = self
             .process_meta_by_index
             .get(&process_index)
-            .ok_or_else(|| anyhow::anyhow!("process_index missing from snapshot index: {process_index}"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("process_index missing from snapshot index: {process_index}")
+            })?;
         Ok(entry
             .process_name
             .clone()
@@ -731,6 +744,9 @@ mod tests {
         assert_eq!(artifact.process_contributions[0].label, "Provider B");
         assert_eq!(artifact.links.len(), 2);
         assert_eq!(artifact.branches.len(), 1);
-        assert_eq!(artifact.branches[0].path_labels, vec!["Root", "Provider B", "Provider C"]);
+        assert_eq!(
+            artifact.branches[0].path_labels,
+            vec!["Root", "Provider B", "Provider C"]
+        );
     }
 }

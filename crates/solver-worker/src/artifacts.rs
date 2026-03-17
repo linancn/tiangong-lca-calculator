@@ -428,7 +428,7 @@ mod tests {
 
         let decoded: ContributionPathArtifact =
             serde_json::from_slice(encoded.bytes.as_slice()).expect("decode json artifact");
-        assert_eq!(decoded.summary.total_impact, 1.23);
+        assert!((decoded.summary.total_impact - 1.23).abs() < 1e-12);
         assert_eq!(decoded.root.label, "Root");
     }
 

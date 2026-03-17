@@ -159,6 +159,7 @@ pub struct ContributionPathMeta {
     pub snapshot_index_version: u8,
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn analyze_contribution_path(
     snapshot_id: Uuid,
     job_id: Uuid,
@@ -629,6 +630,7 @@ mod tests {
     use super::*;
     use crate::snapshot_index::{SnapshotImpactMapEntry, SnapshotProcessMapEntry};
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn analyze_returns_sorted_process_contributions_and_branches() {
         let snapshot_id = Uuid::new_v4();
@@ -737,7 +739,7 @@ mod tests {
         )
         .expect("analyze contribution path");
 
-        assert_eq!(artifact.summary.total_impact, 2.25);
+        assert!((artifact.summary.total_impact - 2.25).abs() < 1e-12);
         assert_eq!(artifact.root.label, "Root");
         assert_eq!(artifact.impact.label, "Global warming");
         assert_eq!(artifact.process_contributions.len(), 3);

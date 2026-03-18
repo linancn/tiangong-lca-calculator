@@ -14,6 +14,7 @@ DECLARE
     v_mode text := coalesce(p_plan->>'mode', '');
     v_model_id uuid := nullif(p_plan->>'modelId', '')::uuid;
     v_expected_version text := nullif(btrim(coalesce(p_plan->>'version', '')), '');
+    v_actor_user_id uuid := nullif(p_plan->>'actorUserId', '')::uuid;
     v_parent jsonb := coalesce(p_plan->'parent', '{}'::jsonb);
     v_parent_json_ordered json := (v_parent->'jsonOrdered')::json;
     v_parent_json_tg jsonb := coalesce(v_parent->'jsonTg', '{}'::jsonb);
@@ -32,6 +33,10 @@ BEGIN
     END IF;
 
     IF v_model_id IS NULL OR v_parent_json_ordered IS NULL THEN
+        RAISE EXCEPTION 'INVALID_PLAN';
+    END IF;
+
+    IF v_actor_user_id IS NULL THEN
         RAISE EXCEPTION 'INVALID_PLAN';
     END IF;
 
@@ -68,8 +73,8 @@ BEGIN
                     RAISE EXCEPTION 'INVALID_PLAN';
                 END IF;
 
-                EXECUTE 'del' || 'ete from processes where id = $1 and version = $2'
-                   USING v_child_id, v_child_version;
+                EXECUTE 'del' || 'ete from processes where id = $1 and version = $2 and model_id = $3'
+                   USING v_child_id, v_child_version, v_model_id;
 
                 GET DIAGNOSTICS v_rows_affected = ROW_COUNT;
                 IF v_rows_affected = 0 THEN
@@ -92,12 +97,14 @@ BEGIN
                         id,
                         json_ordered,
                         model_id,
+                        user_id,
                         rule_verification
                     )
                     VALUES (
                         v_child_id,
                         v_child_json_ordered,
                         v_model_id,
+                        v_actor_user_id,
                         v_child_rule_verification
                     );
                 EXCEPTION
@@ -122,7 +129,8 @@ BEGIN
                        model_id = v_model_id,
                        rule_verification = v_child_rule_verification
                  WHERE id = v_child_id
-                   AND version = v_child_version;
+                   AND version = v_child_version
+                   AND model_id = v_model_id;
 
                 IF NOT FOUND THEN
                     RAISE EXCEPTION 'PROCESS_NOT_FOUND';
@@ -138,12 +146,14 @@ BEGIN
                 id,
                 json_ordered,
                 json_tg,
+                user_id,
                 rule_verification
             )
             VALUES (
                 v_model_id,
                 v_parent_json_ordered,
                 v_parent_json_tg,
+                v_actor_user_id,
                 v_parent_rule_verification
             )
             RETURNING *
@@ -215,8 +225,8 @@ BEGIN
                 p_version
             );
 
-            EXECUTE 'del' || 'ete from processes where id = $1 and version = $2'
-               USING (v_submodel->>'id')::uuid, v_submodel_version;
+            EXECUTE 'del' || 'ete from processes where id = $1 and version = $2 and model_id = $3'
+               USING (v_submodel->>'id')::uuid, v_submodel_version, p_model_id;
 
             GET DIAGNOSTICS v_rows_affected = ROW_COUNT;
             IF v_rows_affected = 0 THEN

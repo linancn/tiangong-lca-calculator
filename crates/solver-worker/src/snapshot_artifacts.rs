@@ -286,7 +286,7 @@ mod tests {
     fn encode_decode_snapshot_artifact_roundtrip() {
         let snapshot_id = uuid::Uuid::new_v4();
         let config = SnapshotBuildConfig {
-            process_states: "100".to_owned(),
+            process_states: crate::default_snapshot_process_states_arg(),
             include_user_id: None,
             process_limit: 0,
             provider_rule: "strict_unique_provider".to_owned(),

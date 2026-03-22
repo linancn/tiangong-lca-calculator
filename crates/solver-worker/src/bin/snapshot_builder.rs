@@ -57,7 +57,7 @@ struct Cli {
     s3_prefix: String,
     #[arg(long)]
     snapshot_id: Option<Uuid>,
-    #[arg(long, default_value = "100")]
+    #[arg(long, default_value_t = solver_worker::default_snapshot_process_states_arg())]
     process_states: String,
     #[arg(long)]
     include_user_id: Option<Uuid>,
@@ -2794,8 +2794,8 @@ mod tests {
     use super::{
         AllocationMode, ExchangeDirection, NormalizationMode, ParsedExchange, ProcessMeta,
         ProviderRule, add_technosphere_edge, biosphere_gross_value, geo_score,
-        resolve_allocation_fraction, resolve_multi_provider, resolve_reference_normalization,
-        time_score,
+        parse_process_states, resolve_allocation_fraction, resolve_multi_provider,
+        resolve_reference_normalization, time_score,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2840,6 +2840,29 @@ mod tests {
             ProviderRule::parse("split_equal").expect("parse"),
             ProviderRule::SplitEqual
         );
+    }
+
+    #[test]
+    fn default_process_states_cover_100_through_199() {
+        let default_states = solver_worker::default_snapshot_process_states_arg();
+        let (all_states, parsed, label) =
+            parse_process_states(default_states.as_str()).expect("parse default states");
+
+        assert!(!all_states);
+        assert_eq!(parsed.len(), 100);
+        assert_eq!(parsed.first().copied(), Some(100));
+        assert_eq!(parsed.last().copied(), Some(199));
+        assert_eq!(label, default_states);
+    }
+
+    #[test]
+    fn explicit_process_states_still_override_default_scope() {
+        let (all_states, parsed, label) =
+            parse_process_states("100,150,199").expect("parse explicit states");
+
+        assert!(!all_states);
+        assert_eq!(parsed, vec![100, 150, 199]);
+        assert_eq!(label, "100,150,199");
     }
 
     #[test]

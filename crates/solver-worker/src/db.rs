@@ -1327,7 +1327,10 @@ async fn run_snapshot_builder_job(
         "--snapshot-id".to_owned(),
         snapshot_id.to_string(),
         "--process-states".to_owned(),
-        process_states.unwrap_or("100").to_owned(),
+        process_states.map_or_else(
+            crate::default_snapshot_process_states_arg,
+            ToOwned::to_owned,
+        ),
         "--provider-rule".to_owned(),
         provider_rule.unwrap_or("strict_unique_provider").to_owned(),
         "--reference-normalization-mode".to_owned(),

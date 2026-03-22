@@ -1,5 +1,16 @@
 //! Worker crate library modules shared by binaries.
 
+pub const DEFAULT_SNAPSHOT_PROCESS_STATE_START: i32 = 100;
+pub const DEFAULT_SNAPSHOT_PROCESS_STATE_END: i32 = 199;
+
+#[must_use]
+pub fn default_snapshot_process_states_arg() -> String {
+    (DEFAULT_SNAPSHOT_PROCESS_STATE_START..=DEFAULT_SNAPSHOT_PROCESS_STATE_END)
+        .map(|state| state.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub mod artifacts;
 pub mod config;
 pub mod contribution_path;

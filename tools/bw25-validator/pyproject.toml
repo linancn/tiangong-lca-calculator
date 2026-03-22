@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 bw25-validate = "bw25_validator.cli:main"
+bw25-request-scope-validate = "bw25_validator.request_scope_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

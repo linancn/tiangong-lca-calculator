@@ -200,6 +200,13 @@ struct BuildOutput {
     snapshot_index: SnapshotIndexDocument,
 }
 
+#[derive(Debug, Clone)]
+struct BuildExecution {
+    output: BuildOutput,
+    compile_scope_graph_sec: f64,
+    assemble_sparse_payload_sec: f64,
+}
+
 type ParsedProcessChunk = (
     ProcessMeta,
     Vec<ParsedExchange>,
@@ -255,10 +262,13 @@ struct BuildTimingSec {
     reused_snapshot: bool,
     total_sec: f64,
     resolve_method_identity_sec: f64,
+    resolve_process_selection_sec: f64,
     compute_source_fingerprint_sec: f64,
     reuse_lookup_sec: f64,
     load_method_factors_sec: f64,
     build_sparse_payload_sec: f64,
+    compile_scope_graph_sec: f64,
+    assemble_sparse_payload_sec: f64,
     encode_artifact_sec: f64,
     upload_artifact_sec: f64,
     upload_snapshot_index_sec: f64,
@@ -378,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let candidate_processes =
         fetch_processes(&pool, all_states, &state_codes, cli.include_user_id).await?;
+    let scope_started = Instant::now();
     let resolved_scope = resolve_process_selection(
         candidate_processes,
         all_states,
@@ -387,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
         provider_rule,
         cli.process_limit,
     )?;
+    build_timing.resolve_process_selection_sec = scope_started.elapsed().as_secs_f64();
     let fingerprint_started = Instant::now();
     let (source_summary, source_fingerprint) =
         compute_source_fingerprint(&pool, &resolved_scope.processes, &build_config).await?;
@@ -550,13 +562,15 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     build_timing.build_sparse_payload_sec = build_started.elapsed().as_secs_f64();
+    build_timing.compile_scope_graph_sec = built.compile_scope_graph_sec;
+    build_timing.assemble_sparse_payload_sec = built.assemble_sparse_payload_sec;
 
     let encode_started = Instant::now();
     let encoded = encode_snapshot_artifact(
         snapshot_id,
         build_config.clone(),
-        built.coverage.clone(),
-        &built.data,
+        built.output.coverage.clone(),
+        &built.output.data,
     )?;
     build_timing.encode_artifact_sec = encode_started.elapsed().as_secs_f64();
 
@@ -571,7 +585,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     build_timing.upload_artifact_sec = upload_started.elapsed().as_secs_f64();
 
-    let snapshot_index_bytes = serde_json::to_vec(&built.snapshot_index)?;
+    let snapshot_index_bytes = serde_json::to_vec(&built.output.snapshot_index)?;
     let upload_snapshot_index_started = Instant::now();
     let snapshot_index_url = store
         .upload_snapshot_index(snapshot_id, snapshot_index_bytes)
@@ -589,7 +603,7 @@ async fn main() -> anyhow::Result<()> {
         &resolved_scope.scope_summary,
         &source_fingerprint,
         &method,
-        &built,
+        &built.output,
         &artifact_url,
         &encoded.sha256,
         i64::try_from(encoded.byte_size).map_err(|_| anyhow::anyhow!("artifact too large"))?,
@@ -604,7 +618,7 @@ async fn main() -> anyhow::Result<()> {
         snapshot_id,
         &build_config,
         &resolved_scope.scope_summary,
-        &built.coverage,
+        &built.output.coverage,
         &artifact_url,
         &source_summary,
         &source_fingerprint,
@@ -616,17 +630,17 @@ async fn main() -> anyhow::Result<()> {
     println!("[snapshot_index] {snapshot_index_url}");
     println!(
         "[matrix] process_count={} flow_count={} a_nnz={} b_nnz={} c_nnz={}",
-        built.data.process_count,
-        built.data.flow_count,
-        built.coverage.matrix_scale.a_nnz,
-        built.coverage.matrix_scale.b_nnz,
-        built.coverage.matrix_scale.c_nnz
+        built.output.data.process_count,
+        built.output.data.flow_count,
+        built.output.coverage.matrix_scale.a_nnz,
+        built.output.coverage.matrix_scale.b_nnz,
+        built.output.coverage.matrix_scale.c_nnz
     );
     println!(
         "[coverage] unique_match={} any_match={} singular_risk={}",
-        built.coverage.matching.unique_provider_match_pct,
-        built.coverage.matching.any_provider_match_pct,
-        built.coverage.singular_risk.risk_level
+        built.output.coverage.matching.unique_provider_match_pct,
+        built.output.coverage.matching.any_provider_match_pct,
+        built.output.coverage.singular_risk.risk_level
     );
 
     Ok(())
@@ -989,7 +1003,7 @@ async fn build_sparse_payload(
     singular_eps: f64,
     has_lcia: bool,
     impact_factor_sets: &[ImpactFactorSet],
-) -> anyhow::Result<BuildOutput> {
+) -> anyhow::Result<BuildExecution> {
     if processes.is_empty() {
         return Err(anyhow::anyhow!("no processes matched filter"));
     }
@@ -998,6 +1012,7 @@ async fn build_sparse_payload(
             "LCIA is enabled but no lciamethod factors were loaded"
         ));
     }
+    let compile_started = Instant::now();
     let compiled_graph = compile_scope_graph(
         pool,
         processes,
@@ -1008,8 +1023,9 @@ async fn build_sparse_payload(
         impact_factor_sets,
     )
     .await?;
-
-    assemble_sparse_payload(
+    let compile_scope_graph_sec = compile_started.elapsed().as_secs_f64();
+    let assemble_started = Instant::now();
+    let output = assemble_sparse_payload(
         snapshot_id,
         method,
         &compiled_graph,
@@ -1017,7 +1033,14 @@ async fn build_sparse_payload(
         singular_eps,
         has_lcia,
         impact_factor_sets,
-    )
+    )?;
+    let assemble_sparse_payload_sec = assemble_started.elapsed().as_secs_f64();
+
+    Ok(BuildExecution {
+        output,
+        compile_scope_graph_sec,
+        assemble_sparse_payload_sec,
+    })
 }
 
 async fn compile_scope_graph(
@@ -1166,6 +1189,28 @@ async fn compile_scope_graph(
     }
 
     let flow_meta = fetch_flow_meta(pool, &flow_candidates).await?;
+    compile_scope_graph_with_flow_meta(
+        compiled_processes,
+        process_meta.as_slice(),
+        exchanges.as_slice(),
+        provider_rule,
+        reference_stats,
+        allocation_stats,
+        flow_candidates,
+        &flow_meta,
+    )
+}
+
+fn compile_scope_graph_with_flow_meta(
+    compiled_processes: Vec<CompiledProcess>,
+    process_meta: &[ProcessMeta],
+    exchanges: &[ParsedExchange],
+    provider_rule: ProviderRule,
+    reference_stats: ReferenceParseStats,
+    allocation_stats: AllocationParseStats,
+    flow_candidates: BTreeSet<Uuid>,
+    flow_meta: &HashMap<Uuid, Value>,
+) -> anyhow::Result<CompiledGraph> {
     let candidate_flow_ids = flow_candidates.into_iter().collect::<Vec<_>>();
     let mut flows = Vec::with_capacity(candidate_flow_ids.len());
     let mut flow_idx_by_id = HashMap::with_capacity(candidate_flow_ids.len());
@@ -1192,7 +1237,7 @@ async fn compile_scope_graph(
     }
 
     let mut provider_sets: HashMap<Uuid, HashSet<i32>> = HashMap::new();
-    for ex in &exchanges {
+    for ex in exchanges {
         if ex.direction == ExchangeDirection::Output {
             provider_sets
                 .entry(ex.flow_id)
@@ -1204,7 +1249,7 @@ async fn compile_scope_graph(
     for (flow_id, providers) in provider_sets {
         let mut sorted = providers.into_iter().collect::<Vec<_>>();
         sorted.sort_by_key(|idx| {
-            process_meta_for_idx(&process_meta, *idx).map_or(Uuid::nil(), |meta| meta.process_id)
+            process_meta_for_idx(process_meta, *idx).map_or(Uuid::nil(), |meta| meta.process_id)
         });
         provider_map.insert(flow_id, sorted);
     }
@@ -1214,7 +1259,7 @@ async fn compile_scope_graph(
     let mut biosphere_edges = Vec::<CompiledBiosphereEdge>::new();
     let mut matching_stats = CompiledMatchingStats::default();
 
-    for ex in &exchanges {
+    for ex in exchanges {
         if let Some(flow_idx) = flow_idx_by_id.get(&ex.flow_id).copied()
             && elementary_flow_idx.contains(&flow_idx)
             && let Some(amount) = ex.amount
@@ -1291,7 +1336,7 @@ async fn compile_scope_graph(
                 provider_rule,
                 ex,
                 providers.ok_or_else(|| anyhow::anyhow!("missing provider list"))?,
-                &process_meta,
+                process_meta,
             )?;
             if let Some(resolution) = resolution {
                 matching_stats.matched_multi_resolved += 1;
@@ -3185,6 +3230,10 @@ fn write_report_files(
         build_timing.resolve_method_identity_sec
     ));
     md.push_str(&format!(
+        "- resolve_process_selection_sec: `{}`\n",
+        build_timing.resolve_process_selection_sec
+    ));
+    md.push_str(&format!(
         "- compute_source_fingerprint_sec: `{}`\n",
         build_timing.compute_source_fingerprint_sec
     ));
@@ -3199,6 +3248,14 @@ fn write_report_files(
     md.push_str(&format!(
         "- build_sparse_payload_sec: `{}`\n",
         build_timing.build_sparse_payload_sec
+    ));
+    md.push_str(&format!(
+        "- compile_scope_graph_sec: `{}`\n",
+        build_timing.compile_scope_graph_sec
+    ));
+    md.push_str(&format!(
+        "- assemble_sparse_payload_sec: `{}`\n",
+        build_timing.assemble_sparse_payload_sec
     ));
     md.push_str(&format!(
         "- encode_artifact_sec: `{}`\n",
@@ -3368,17 +3425,19 @@ fn write_report_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        AllocationMode, ExchangeDirection, NormalizationMode, ParsedExchange, ProcessMeta,
-        ProcessRow, ProviderRule, add_technosphere_edge, biosphere_gross_value, compute_scope_hash,
-        geo_score, normalize_request_roots, parse_process_states, resolve_allocation_fraction,
-        resolve_multi_provider, resolve_process_selection, resolve_reference_normalization,
-        time_score,
+        AllocationMode, ExchangeDirection, ImpactFactorSet, MethodSelection, NormalizationMode,
+        ParsedExchange, ProcessMeta, ProcessRow, ProviderRule, add_technosphere_edge,
+        assemble_sparse_payload, biosphere_gross_value, compile_scope_graph_with_flow_meta,
+        compute_scope_hash, geo_score, normalize_request_roots, parse_process_states,
+        resolve_allocation_fraction, resolve_multi_provider, resolve_process_selection,
+        resolve_reference_normalization, time_score,
     };
     use chrono::Utc;
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use uuid::Uuid;
 
+    use solver_core::{NumericOptions, SolveOptions, SolverService};
     use solver_worker::graph_types::{RequestRootProcess, ScopeProcessPartition};
 
     fn assert_close(actual: f64, expected: f64) {
@@ -3566,6 +3625,15 @@ mod tests {
     }
 
     fn process_json(exchanges: &[(&str, Uuid)]) -> serde_json::Value {
+        process_json_with_amounts(
+            &exchanges
+                .iter()
+                .map(|(direction, flow_id)| (*direction, *flow_id, 1.0_f64))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn process_json_with_amounts(exchanges: &[(&str, Uuid, f64)]) -> serde_json::Value {
         json!({
             "processDataSet": {
                 "processInformation": {
@@ -3574,14 +3642,14 @@ mod tests {
                     }
                 },
                 "exchanges": {
-                    "exchange": exchanges.iter().enumerate().map(|(idx, (direction, flow_id))| {
+                    "exchange": exchanges.iter().enumerate().map(|(idx, (direction, flow_id, amount))| {
                         json!({
                             "@dataSetInternalID": (idx + 1).to_string(),
                             "exchangeDirection": direction,
                             "referenceToFlowDataSet": {
                                 "@refObjectId": flow_id
                             },
-                            "meanAmount": 1.0,
+                            "meanAmount": amount,
                             "allocations": {
                                 "allocation": {
                                     "@allocatedFraction": 1.0
@@ -3601,6 +3669,386 @@ mod tests {
             raw[idx] = byte;
         }
         Uuid::from_bytes(raw)
+    }
+
+    fn flow_json(kind: &str) -> serde_json::Value {
+        match kind {
+            "elementary" => json!({
+                "flowDataSet": {
+                    "flowInformation": {
+                        "dataSetInformation": {
+                            "classificationInformation": {
+                                "common:elementaryFlowCategorization": {
+                                    "common:category": {
+                                        "#text": "Emissions"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+            _ => json!({
+                "flowDataSet": {
+                    "flowInformation": {
+                        "dataSetInformation": {}
+                    }
+                }
+            }),
+        }
+    }
+
+    fn solve_h_for_process_id(
+        built: &super::BuildOutput,
+        process_id: Uuid,
+    ) -> anyhow::Result<(HashMap<Uuid, f64>, Vec<f64>)> {
+        let process_idx = built
+            .snapshot_index
+            .process_map
+            .iter()
+            .find(|entry| entry.process_id == process_id)
+            .map(|entry| entry.process_index)
+            .ok_or_else(|| anyhow::anyhow!("process id missing from snapshot index"))?;
+        let rhs_len = usize::try_from(built.data.process_count)
+            .map_err(|_| anyhow::anyhow!("invalid process count"))?;
+        let rhs_idx =
+            usize::try_from(process_idx).map_err(|_| anyhow::anyhow!("negative process idx"))?;
+        let mut rhs = vec![0.0; rhs_len];
+        rhs[rhs_idx] = 1.0;
+
+        let solver = SolverService::new();
+        solver.prepare(&built.data, NumericOptions::default())?;
+        let solve_result = solver.solve_one(
+            built.data.model_version,
+            NumericOptions::default(),
+            rhs.as_slice(),
+            SolveOptions::default(),
+        )?;
+
+        let x = solve_result
+            .x
+            .ok_or_else(|| anyhow::anyhow!("missing x output"))?;
+        let h = solve_result
+            .h
+            .ok_or_else(|| anyhow::anyhow!("missing h output"))?;
+        let mut x_by_process_id = HashMap::new();
+        for entry in &built.snapshot_index.process_map {
+            let idx = usize::try_from(entry.process_index)
+                .map_err(|_| anyhow::anyhow!("negative process map idx"))?;
+            let value = *x
+                .get(idx)
+                .ok_or_else(|| anyhow::anyhow!("x missing process index"))?;
+            x_by_process_id.insert(entry.process_id, value);
+        }
+        Ok((x_by_process_id, h))
+    }
+
+    fn compiled_processes_for_test(
+        rows: &[ProcessRow],
+        meta: &[ProcessMeta],
+        include_user_id: Option<Uuid>,
+    ) -> Vec<super::CompiledProcess> {
+        meta.iter()
+            .map(|item| {
+                let row = rows
+                    .get(usize::try_from(item.process_idx).expect("non-negative process idx"))
+                    .expect("row for process idx");
+                super::CompiledProcess {
+                    process_idx: item.process_idx,
+                    process_id: item.process_id,
+                    process_version: item.process_version.clone(),
+                    process_name: item.process_name.clone(),
+                    model_id: item.model_id,
+                    location: item.location.clone(),
+                    reference_year: item.reference_year,
+                    partition: super::classify_scope_partition(row, include_user_id),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn request_scoped_fixture_matches_full_snapshot_for_private_root_outputs() {
+        let private_user = Uuid::new_v4();
+        let public_provider_id = Uuid::new_v4();
+        let private_root_id = Uuid::new_v4();
+        let public_noise_id = Uuid::new_v4();
+        let product_flow = fixed_flow_id("product-main");
+        let elementary_flow = fixed_flow_id("co2-main");
+        let private_output_flow = fixed_flow_id("private-output");
+        let noise_output_flow = fixed_flow_id("noise-output");
+        let snapshot_full_id = Uuid::new_v4();
+        let snapshot_scoped_id = Uuid::new_v4();
+
+        let processes = vec![
+            ProcessRow {
+                id: public_provider_id,
+                version: "01.00.000".to_owned(),
+                model_id: None,
+                user_id: None,
+                modified_at: Some(Utc::now()),
+                json: process_json_with_amounts(&[
+                    ("Output", product_flow, 1.0),
+                    ("Output", elementary_flow, 2.0),
+                ]),
+            },
+            ProcessRow {
+                id: private_root_id,
+                version: "01.00.000".to_owned(),
+                model_id: None,
+                user_id: Some(private_user),
+                modified_at: Some(Utc::now()),
+                json: process_json_with_amounts(&[
+                    ("Input", product_flow, 1.0),
+                    ("Output", private_output_flow, 1.0),
+                    ("Output", elementary_flow, 1.0),
+                ]),
+            },
+            ProcessRow {
+                id: public_noise_id,
+                version: "01.00.000".to_owned(),
+                model_id: None,
+                user_id: None,
+                modified_at: Some(Utc::now()),
+                json: process_json_with_amounts(&[("Output", noise_output_flow, 1.0)]),
+            },
+        ];
+
+        let full_selection = resolve_process_selection(
+            processes.clone(),
+            false,
+            &[100],
+            Some(private_user),
+            &[],
+            ProviderRule::StrictUniqueProvider,
+            0,
+        )
+        .expect("full selection");
+        let scoped_selection = resolve_process_selection(
+            processes.clone(),
+            false,
+            &[100],
+            Some(private_user),
+            &[RequestRootProcess::new(
+                private_root_id,
+                "01.00.000".to_owned(),
+            )],
+            ProviderRule::StrictUniqueProvider,
+            0,
+        )
+        .expect("scoped selection");
+
+        let flow_candidates = BTreeSet::from([
+            product_flow,
+            elementary_flow,
+            private_output_flow,
+            noise_output_flow,
+        ]);
+        let flow_meta = HashMap::from([
+            (product_flow, flow_json("product")),
+            (elementary_flow, flow_json("elementary")),
+            (private_output_flow, flow_json("product")),
+            (noise_output_flow, flow_json("product")),
+        ]);
+        let impact_factor_sets = vec![ImpactFactorSet {
+            impact_id: Uuid::new_v4(),
+            impact_key: "method:test".to_owned(),
+            impact_name: "Test impact".to_owned(),
+            unit: "kg CO2e".to_owned(),
+            factors_by_flow: HashMap::from([(elementary_flow, 1.0)]),
+        }];
+
+        let full_process_meta = vec![
+            ProcessMeta {
+                process_idx: 0,
+                process_id: public_provider_id,
+                process_version: "01.00.000".to_owned(),
+                process_name: Some("Public provider".to_owned()),
+                model_id: None,
+                location: Some("CN".to_owned()),
+                reference_year: Some(2025),
+            },
+            ProcessMeta {
+                process_idx: 1,
+                process_id: private_root_id,
+                process_version: "01.00.000".to_owned(),
+                process_name: Some("Private root".to_owned()),
+                model_id: None,
+                location: Some("CN-BJ".to_owned()),
+                reference_year: Some(2025),
+            },
+            ProcessMeta {
+                process_idx: 2,
+                process_id: public_noise_id,
+                process_version: "01.00.000".to_owned(),
+                process_name: Some("Public noise".to_owned()),
+                model_id: None,
+                location: Some("GLO".to_owned()),
+                reference_year: Some(2010),
+            },
+        ];
+        let full_exchanges = vec![
+            ParsedExchange {
+                process_idx: 0,
+                flow_id: product_flow,
+                direction: ExchangeDirection::Output,
+                amount: Some(1.0),
+            },
+            ParsedExchange {
+                process_idx: 0,
+                flow_id: elementary_flow,
+                direction: ExchangeDirection::Output,
+                amount: Some(2.0),
+            },
+            ParsedExchange {
+                process_idx: 1,
+                flow_id: product_flow,
+                direction: ExchangeDirection::Input,
+                amount: Some(1.0),
+            },
+            ParsedExchange {
+                process_idx: 1,
+                flow_id: private_output_flow,
+                direction: ExchangeDirection::Output,
+                amount: Some(1.0),
+            },
+            ParsedExchange {
+                process_idx: 1,
+                flow_id: elementary_flow,
+                direction: ExchangeDirection::Output,
+                amount: Some(1.0),
+            },
+            ParsedExchange {
+                process_idx: 2,
+                flow_id: noise_output_flow,
+                direction: ExchangeDirection::Output,
+                amount: Some(1.0),
+            },
+        ];
+
+        let scoped_process_meta = vec![
+            full_process_meta[0].clone(),
+            ProcessMeta {
+                process_idx: 1,
+                ..full_process_meta[1].clone()
+            },
+        ];
+        let scoped_exchanges = full_exchanges
+            .iter()
+            .filter(|exchange| exchange.process_idx != 2)
+            .cloned()
+            .collect::<Vec<_>>();
+        let scoped_flow_candidates =
+            BTreeSet::from([product_flow, elementary_flow, private_output_flow]);
+
+        let full_compiled = compile_scope_graph_with_flow_meta(
+            compiled_processes_for_test(
+                &full_selection.processes,
+                &full_process_meta,
+                Some(private_user),
+            ),
+            full_process_meta.as_slice(),
+            full_exchanges.as_slice(),
+            ProviderRule::StrictUniqueProvider,
+            super::ReferenceParseStats {
+                normalized_processes: 3,
+                ..Default::default()
+            },
+            super::AllocationParseStats {
+                exchange_total: 6,
+                fraction_present_count: 6,
+                ..Default::default()
+            },
+            flow_candidates,
+            &flow_meta,
+        )
+        .expect("compile full");
+        let scoped_compiled = compile_scope_graph_with_flow_meta(
+            compiled_processes_for_test(
+                &scoped_selection.processes,
+                &scoped_process_meta,
+                Some(private_user),
+            ),
+            scoped_process_meta.as_slice(),
+            scoped_exchanges.as_slice(),
+            ProviderRule::StrictUniqueProvider,
+            super::ReferenceParseStats {
+                normalized_processes: 2,
+                ..Default::default()
+            },
+            super::AllocationParseStats {
+                exchange_total: 5,
+                fraction_present_count: 5,
+                ..Default::default()
+            },
+            scoped_flow_candidates,
+            &flow_meta,
+        )
+        .expect("compile scoped");
+
+        assert_eq!(scoped_selection.scope_summary.public_process_count, 1);
+        assert_eq!(scoped_selection.scope_summary.private_process_count, 1);
+        assert_eq!(scoped_compiled.processes.len(), 2);
+        assert!(
+            scoped_compiled
+                .technosphere_edges
+                .iter()
+                .any(|edge| edge.provider_idx == 0 && edge.consumer_idx == 1)
+        );
+
+        let method = MethodSelection {
+            has_lcia: true,
+            method_id: Some(Uuid::new_v4()),
+            method_version: Some("01.00.000".to_owned()),
+            method_count: 1,
+            factor_count: 1,
+        };
+        let full_built = assemble_sparse_payload(
+            snapshot_full_id,
+            &method,
+            &full_compiled,
+            0.999_999,
+            1e-12,
+            true,
+            &impact_factor_sets,
+        )
+        .expect("assemble full");
+        let scoped_built = assemble_sparse_payload(
+            snapshot_scoped_id,
+            &method,
+            &scoped_compiled,
+            0.999_999,
+            1e-12,
+            true,
+            &impact_factor_sets,
+        )
+        .expect("assemble scoped");
+
+        let (full_x, full_h) =
+            solve_h_for_process_id(&full_built, private_root_id).expect("solve full");
+        let (scoped_x, scoped_h) =
+            solve_h_for_process_id(&scoped_built, private_root_id).expect("solve scoped");
+
+        assert_close(
+            *full_x
+                .get(&public_provider_id)
+                .expect("full provider contribution"),
+            *scoped_x
+                .get(&public_provider_id)
+                .expect("scoped provider contribution"),
+        );
+        assert_close(
+            *full_x
+                .get(&private_root_id)
+                .expect("full root contribution"),
+            *scoped_x
+                .get(&private_root_id)
+                .expect("scoped root contribution"),
+        );
+        assert_close(full_h[0], scoped_h[0]);
+        assert_eq!(scoped_compiled.matching_stats.input_edges_total, 1);
+        assert_eq!(scoped_compiled.matching_stats.matched_unique_provider, 1);
+        assert_eq!(scoped_compiled.matching_stats.unmatched_no_provider, 0);
     }
 
     #[test]

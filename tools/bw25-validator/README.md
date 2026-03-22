@@ -15,3 +15,10 @@ It validates one result (`solve_one` or `solve_all_unit`) against a Brightway re
 This tool is not part of the default worker path. Run it manually.
 
 On Linux `x86_64`, the tool installs `pypardiso` by default to speed up sparse solves and avoid Brightway's x64 warning about missing `pypardiso`.
+
+Additional manual CLI:
+
+- `bw25-request-scope-validate`
+  - compares one request-scoped snapshot against one broader full snapshot
+  - checks LCIA parity for a provided `process_id` list
+  - reads `reports/snapshot-coverage/<snapshot_id>.json` when present to summarize request-scope timing and Phase A readiness signals

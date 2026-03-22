@@ -427,7 +427,45 @@ USER_API_KEY=<base64-email-password> \
 ./scripts/export_latest_matrices.sh --result-id <result_id>
 ```
 
-### 6.3 生产常驻（systemd，推荐）
+### 6.3 Request-scoped snapshot parity / timing 验证
+
+当需要判断 request-scoped snapshot 是否已经可以替代更宽的 full snapshot 构建路径时，建议为同一批私有 request roots 保留两份 snapshot：
+
+- `full_snapshot`：按更宽 process scope 构建出的对照 snapshot
+- `scoped_snapshot`：通过 `--root-process` 闭包构建出的 request-scoped snapshot
+
+`snapshot_builder` 的 coverage report 现已额外包含这些阶段耗时：
+
+- `resolve_process_selection_sec`
+- `compile_scope_graph_sec`
+- `assemble_sparse_payload_sec`
+
+可使用下面的脚本对两份 snapshot 做 LCIA parity / build timing / readiness 对比：
+
+```bash
+./scripts/validate_request_scope_parity.sh \
+  --full-snapshot-id <full_snapshot_id> \
+  --scoped-snapshot-id <scoped_snapshot_id> \
+  --process-ids-file reports/request-scope/<private-request-processes>.tsv
+```
+
+输出：
+
+- `reports/request-scope-validation/request-scope-<scoped_snapshot_id>-vs-<full_snapshot_id>.json`
+- `reports/request-scope-validation/request-scope-<scoped_snapshot_id>-vs-<full_snapshot_id>.md`
+
+报告会检查：
+
+- 指定 process 列表上的 `expected/direct/indirect` LCIA 值是否在阈值内保持一致
+- request-scoped build report 是否包含 public/private scope 计数
+- request-scoped build report 是否暴露 `scope selection / graph compile / snapshot assembly` 分阶段耗时
+- Phase A 是否满足“可切默认路径”和“具备后续 block-solve 边界”的 readiness 条件
+
+当前已知边界：
+
+- runtime artifact 仍未直接持久化 compiled coupling edges；跨 public/private coupling 的可见性当前通过 repo 内 fixture tests 与 compiled graph 边界保证，而不是通过 snapshot artifact report 直接导出
+
+### 6.4 生产常驻（systemd，推荐）
 
 `cargo run` 适合开发调试。生产环境建议使用 `systemd` 托管 `release` 二进制（开机自启、崩溃自恢复、统一日志）。
 

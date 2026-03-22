@@ -330,6 +330,18 @@ set -a && source .env && set +a
 cargo run -p solver-worker --bin solver-worker --release -- --mode worker
 ```
 
+启动 TIDAS package 导入导出 worker：
+
+```bash
+set -a && source .env && set +a
+cargo run -p solver-worker --bin package_worker --release -- --pgmq-queue lca_package_jobs --worker-vt-seconds 600 --worker-poll-ms 300
+```
+
+说明：
+
+- `solver-worker` 消费 `lca_jobs`，处理 `prepare_factorization` / `solve_one` / `solve_all_unit` 等计算任务。
+- `package_worker` 消费 `lca_package_jobs`，处理前端 TIDAS package 导出/导入异步任务。
+
 ### 6.2 计算正确性基线流程（Expected 对比）
 
 `bw25-validator` 适合做“同一 snapshot 下的数值交叉验证”；若要在数据反复变更后持续验收，建议使用“手动 expected 基线 + API 对比”流程。
@@ -490,7 +502,64 @@ sudo systemctl restart solver-worker@1 solver-worker@2
 - 先从 2 个 worker 实例开始，再根据队列积压和 CPU 使用率调整。
 - `WORKER_VT_SECONDS` 需要大于慢任务耗时，避免消息重复消费。
 
-### 6.3 结果保留与 GC（S3 + DB）
+### 6.4 TIDAS Package Worker 常驻（systemd，推荐）
+
+若前端需要异步导入/导出 TIDAS package，建议单独用 `systemd` 托管 `package_worker`，避免与 `solver-worker` 共用同一进程。
+
+构建：
+
+```bash
+cd /home/ubuntu/projects/lca_workspace/tiangong-lca-calculator
+cargo build -p solver-worker --bin package_worker --release
+```
+
+创建服务文件 `/etc/systemd/system/package-worker.service`：
+
+```ini
+[Unit]
+Description=TianGong LCA Package Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/projects/lca_workspace/tiangong-lca-calculator
+EnvironmentFile=/home/ubuntu/projects/lca_workspace/tiangong-lca-calculator/.env
+Environment=RUST_LOG=info
+ExecStart=/home/ubuntu/projects/lca_workspace/tiangong-lca-calculator/target/release/package_worker --pgmq-queue lca_package_jobs --worker-vt-seconds 600 --worker-poll-ms 300
+Restart=always
+RestartSec=2
+TimeoutStopSec=30
+LimitNOFILE=65535
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+加载并启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now package-worker.service
+```
+
+查看状态与日志：
+
+```bash
+systemctl status package-worker.service --no-pager
+journalctl -u package-worker.service -f
+```
+
+更新二进制后重启：
+
+```bash
+sudo systemctl restart package-worker.service
+```
+
+### 6.5 结果保留与 GC（S3 + DB）
 
 `lca_results` 采用过期字段 + 保留规则：
 

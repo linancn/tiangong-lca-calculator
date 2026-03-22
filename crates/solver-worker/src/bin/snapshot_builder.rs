@@ -23,6 +23,12 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use solver_core::{ModelSparseData, SparseTriplet};
+use solver_worker::compiled_graph::{
+    CompiledAllocationStats, CompiledBiosphereEdge, CompiledEdgePartition, CompiledFlow,
+    CompiledFlowKind, CompiledGraph, CompiledMatchingStats, CompiledProcess,
+    CompiledProviderAllocation, CompiledProviderDecision, CompiledReferenceStats,
+    CompiledTechnosphereEdge,
+};
 use solver_worker::graph_types::{
     RequestRootProcess, ResolvedScopeProcess, ScopeProcessPartition, SnapshotSelectionMode,
 };
@@ -533,6 +539,7 @@ async fn main() -> anyhow::Result<()> {
         snapshot_id,
         &method,
         resolved_scope.processes.clone(),
+        cli.include_user_id,
         provider_rule,
         reference_normalization_mode,
         allocation_mode,
@@ -974,6 +981,7 @@ async fn build_sparse_payload(
     snapshot_id: Uuid,
     method: &MethodSelection,
     processes: Vec<ProcessRow>,
+    include_user_id: Option<Uuid>,
     provider_rule: ProviderRule,
     reference_normalization_mode: NormalizationMode,
     allocation_mode: AllocationMode,
@@ -990,9 +998,39 @@ async fn build_sparse_payload(
             "LCIA is enabled but no lciamethod factors were loaded"
         ));
     }
+    let compiled_graph = compile_scope_graph(
+        pool,
+        processes,
+        include_user_id,
+        provider_rule,
+        reference_normalization_mode,
+        allocation_mode,
+        impact_factor_sets,
+    )
+    .await?;
+
+    assemble_sparse_payload(
+        snapshot_id,
+        method,
+        &compiled_graph,
+        self_loop_cutoff,
+        singular_eps,
+        has_lcia,
+        impact_factor_sets,
+    )
+}
+
+async fn compile_scope_graph(
+    pool: &PgPool,
+    processes: Vec<ProcessRow>,
+    include_user_id: Option<Uuid>,
+    provider_rule: ProviderRule,
+    reference_normalization_mode: NormalizationMode,
+    allocation_mode: AllocationMode,
+    impact_factor_sets: &[ImpactFactorSet],
+) -> anyhow::Result<CompiledGraph> {
     let process_count_i32 =
         i32::try_from(processes.len()).map_err(|_| anyhow::anyhow!("process overflow"))?;
-
     let chunks = processes
         .par_iter()
         .enumerate()
@@ -1104,6 +1142,23 @@ async fn build_sparse_payload(
         );
     }
 
+    let mut compiled_processes = Vec::with_capacity(process_meta.len());
+    for meta in &process_meta {
+        let row = processes
+            .get(usize::try_from(meta.process_idx).map_err(|_| anyhow::anyhow!("negative idx"))?)
+            .ok_or_else(|| anyhow::anyhow!("missing process row for idx={}", meta.process_idx))?;
+        compiled_processes.push(CompiledProcess {
+            process_idx: meta.process_idx,
+            process_id: meta.process_id,
+            process_version: meta.process_version.clone(),
+            process_name: meta.process_name.clone(),
+            model_id: meta.model_id,
+            location: meta.location.clone(),
+            reference_year: meta.reference_year,
+            partition: classify_scope_partition(row, include_user_id),
+        });
+    }
+
     for impact in impact_factor_sets {
         for flow_id in impact.factors_by_flow.keys() {
             flow_candidates.insert(*flow_id);
@@ -1111,19 +1166,29 @@ async fn build_sparse_payload(
     }
 
     let flow_meta = fetch_flow_meta(pool, &flow_candidates).await?;
-    let flow_ids = flow_candidates.into_iter().collect::<Vec<_>>();
-    let flow_count = i32::try_from(flow_ids.len()).map_err(|_| anyhow::anyhow!("flow overflow"))?;
-    let mut flow_idx_by_id = HashMap::with_capacity(flow_ids.len());
+    let candidate_flow_ids = flow_candidates.into_iter().collect::<Vec<_>>();
+    let mut flows = Vec::with_capacity(candidate_flow_ids.len());
+    let mut flow_idx_by_id = HashMap::with_capacity(candidate_flow_ids.len());
     let mut elementary_flow_idx = HashSet::new();
-    for (idx, flow_id) in flow_ids.iter().enumerate() {
-        let idx_i32 = i32::try_from(idx).map_err(|_| anyhow::anyhow!("flow idx overflow"))?;
-        flow_idx_by_id.insert(*flow_id, idx_i32);
-        let kind = flow_meta
+    for (idx, flow_id) in candidate_flow_ids.iter().enumerate() {
+        let flow_index = i32::try_from(idx).map_err(|_| anyhow::anyhow!("flow idx overflow"))?;
+        let kind = if flow_meta
             .get(flow_id)
-            .map_or("product", |meta| classify_flow_kind(meta));
-        if kind == "elementary" {
-            elementary_flow_idx.insert(idx_i32);
+            .is_some_and(|meta| classify_flow_kind(meta) == "elementary")
+        {
+            CompiledFlowKind::Elementary
+        } else {
+            CompiledFlowKind::Product
+        };
+        if kind == CompiledFlowKind::Elementary {
+            elementary_flow_idx.insert(flow_index);
         }
+        flow_idx_by_id.insert(*flow_id, flow_index);
+        flows.push(CompiledFlow {
+            flow_idx: flow_index,
+            flow_id: *flow_id,
+            kind,
+        });
     }
 
     let mut provider_sets: HashMap<Uuid, HashSet<i32>> = HashMap::new();
@@ -1144,26 +1209,33 @@ async fn build_sparse_payload(
         provider_map.insert(flow_id, sorted);
     }
 
-    let mut a_map: HashMap<(i32, i32), f64> = HashMap::new();
-    let mut b_map: HashMap<(i32, i32), f64> = HashMap::new();
-    let mut input_edges_total: i64 = 0;
-    let mut matched_unique: i64 = 0;
-    let mut matched_multi: i64 = 0;
-    let mut matched_multi_resolved: i64 = 0;
-    let mut matched_multi_unresolved: i64 = 0;
-    let mut matched_multi_fallback_equal: i64 = 0;
-    let mut a_input_edges_written: i64 = 0;
-    let mut unmatched: i64 = 0;
+    let mut provider_decisions = Vec::<CompiledProviderDecision>::new();
+    let mut technosphere_edges = Vec::<CompiledTechnosphereEdge>::new();
+    let mut biosphere_edges = Vec::<CompiledBiosphereEdge>::new();
+    let mut matching_stats = CompiledMatchingStats::default();
 
     for ex in &exchanges {
-        if let Some(flow_idx) = flow_idx_by_id.get(&ex.flow_id).copied() {
-            if elementary_flow_idx.contains(&flow_idx)
-                && let Some(amount) = ex.amount
-            {
-                let value = biosphere_gross_value(amount);
-                if value.abs() > f64::EPSILON {
-                    *b_map.entry((flow_idx, ex.process_idx)).or_insert(0.0) += value;
-                }
+        if let Some(flow_idx) = flow_idx_by_id.get(&ex.flow_id).copied()
+            && elementary_flow_idx.contains(&flow_idx)
+            && let Some(amount) = ex.amount
+        {
+            let value = biosphere_gross_value(amount);
+            if value.abs() > f64::EPSILON {
+                let process_partition =
+                    compiled_process_for_idx(&compiled_processes, ex.process_idx)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "missing compiled process for biosphere idx={}",
+                                ex.process_idx
+                            )
+                        })?
+                        .partition;
+                biosphere_edges.push(CompiledBiosphereEdge {
+                    process_idx: ex.process_idx,
+                    flow_idx,
+                    amount: value,
+                    process_partition,
+                });
             }
         }
 
@@ -1174,20 +1246,47 @@ async fn build_sparse_payload(
         let Some(amount) = ex.amount else {
             continue;
         };
-        input_edges_total += 1;
+        matching_stats.input_edges_total += 1;
         let providers = provider_map.get(&ex.flow_id);
-        let provider_cnt = providers.map_or(0, Vec::len);
-        if provider_cnt == 1 {
-            matched_unique += 1;
-            a_input_edges_written += 1;
+        let candidate_provider_count = i32::try_from(providers.map_or(0, Vec::len))
+            .map_err(|_| anyhow::anyhow!("providers"))?;
+        if candidate_provider_count == 1 {
+            matching_stats.matched_unique_provider += 1;
+            matching_stats.a_input_edges_written += 1;
             let provider_idx = *providers
                 .and_then(|vec| vec.first())
                 .ok_or_else(|| anyhow::anyhow!("missing provider idx"))?;
-            // A is stored as provider(row) -> consumer(col), so M = I - A
-            // propagates demand from downstream to upstream with x = (I - A)^-1 y.
-            add_technosphere_edge(&mut a_map, provider_idx, ex.process_idx, amount);
-        } else if provider_cnt > 1 {
-            matched_multi += 1;
+            provider_decisions.push(CompiledProviderDecision {
+                consumer_idx: ex.process_idx,
+                flow_id: ex.flow_id,
+                candidate_provider_count,
+                matched_provider_count: 1,
+                used_equal_fallback: false,
+                allocations: vec![CompiledProviderAllocation {
+                    provider_idx,
+                    weight: 1.0,
+                }],
+            });
+            let provider = compiled_process_for_idx(&compiled_processes, provider_idx)
+                .ok_or_else(|| anyhow::anyhow!("missing compiled provider idx={provider_idx}"))?;
+            let consumer = compiled_process_for_idx(&compiled_processes, ex.process_idx)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("missing compiled consumer idx={}", ex.process_idx)
+                })?;
+            technosphere_edges.push(CompiledTechnosphereEdge {
+                provider_idx,
+                consumer_idx: ex.process_idx,
+                flow_id: ex.flow_id,
+                amount,
+                provider_partition: provider.partition,
+                consumer_partition: consumer.partition,
+                partition: CompiledEdgePartition::from_partitions(
+                    provider.partition,
+                    consumer.partition,
+                ),
+            });
+        } else if candidate_provider_count > 1 {
+            matching_stats.matched_multi_provider += 1;
             let resolution = resolve_multi_provider(
                 provider_rule,
                 ex,
@@ -1195,20 +1294,136 @@ async fn build_sparse_payload(
                 &process_meta,
             )?;
             if let Some(resolution) = resolution {
-                matched_multi_resolved += 1;
+                matching_stats.matched_multi_resolved += 1;
                 if resolution.used_equal_fallback {
-                    matched_multi_fallback_equal += 1;
+                    matching_stats.matched_multi_fallback_equal += 1;
                 }
-                a_input_edges_written += 1;
-                for (provider_idx, weight) in resolution.allocations {
-                    let weighted = amount * weight;
-                    add_technosphere_edge(&mut a_map, provider_idx, ex.process_idx, weighted);
+                matching_stats.a_input_edges_written += 1;
+                let allocations = resolution
+                    .allocations
+                    .into_iter()
+                    .map(|(provider_idx, weight)| CompiledProviderAllocation {
+                        provider_idx,
+                        weight,
+                    })
+                    .collect::<Vec<_>>();
+                provider_decisions.push(CompiledProviderDecision {
+                    consumer_idx: ex.process_idx,
+                    flow_id: ex.flow_id,
+                    candidate_provider_count,
+                    matched_provider_count: i32::try_from(allocations.len())
+                        .map_err(|_| anyhow::anyhow!("provider allocation overflow"))?,
+                    used_equal_fallback: resolution.used_equal_fallback,
+                    allocations: allocations.clone(),
+                });
+                let consumer = compiled_process_for_idx(&compiled_processes, ex.process_idx)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("missing compiled consumer idx={}", ex.process_idx)
+                    })?;
+                for allocation in &allocations {
+                    let weighted = amount * allocation.weight;
+                    if weighted.abs() <= f64::EPSILON {
+                        continue;
+                    }
+                    let provider =
+                        compiled_process_for_idx(&compiled_processes, allocation.provider_idx)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "missing compiled provider idx={}",
+                                    allocation.provider_idx
+                                )
+                            })?;
+                    technosphere_edges.push(CompiledTechnosphereEdge {
+                        provider_idx: allocation.provider_idx,
+                        consumer_idx: ex.process_idx,
+                        flow_id: ex.flow_id,
+                        amount: weighted,
+                        provider_partition: provider.partition,
+                        consumer_partition: consumer.partition,
+                        partition: CompiledEdgePartition::from_partitions(
+                            provider.partition,
+                            consumer.partition,
+                        ),
+                    });
                 }
             } else {
-                matched_multi_unresolved += 1;
+                matching_stats.matched_multi_unresolved += 1;
+                provider_decisions.push(CompiledProviderDecision {
+                    consumer_idx: ex.process_idx,
+                    flow_id: ex.flow_id,
+                    candidate_provider_count,
+                    matched_provider_count: 0,
+                    used_equal_fallback: false,
+                    allocations: Vec::new(),
+                });
             }
         } else {
-            unmatched += 1;
+            matching_stats.unmatched_no_provider += 1;
+            provider_decisions.push(CompiledProviderDecision {
+                consumer_idx: ex.process_idx,
+                flow_id: ex.flow_id,
+                candidate_provider_count: 0,
+                matched_provider_count: 0,
+                used_equal_fallback: false,
+                allocations: Vec::new(),
+            });
+        }
+    }
+
+    Ok(CompiledGraph {
+        processes: compiled_processes,
+        flows,
+        provider_decisions,
+        technosphere_edges,
+        biosphere_edges,
+        reference_stats: CompiledReferenceStats {
+            missing_reference: reference_stats.missing_reference,
+            invalid_reference: reference_stats.invalid_reference,
+            normalized_processes: reference_stats.normalized_processes,
+        },
+        allocation_stats: CompiledAllocationStats {
+            exchange_total: allocation_stats.exchange_total,
+            fraction_present_count: allocation_stats.fraction_present_count,
+            fraction_missing_count: allocation_stats.fraction_missing_count,
+            fraction_invalid_count: allocation_stats.fraction_invalid_count,
+        },
+        matching_stats,
+    })
+}
+
+fn assemble_sparse_payload(
+    snapshot_id: Uuid,
+    method: &MethodSelection,
+    compiled_graph: &CompiledGraph,
+    self_loop_cutoff: f64,
+    singular_eps: f64,
+    has_lcia: bool,
+    impact_factor_sets: &[ImpactFactorSet],
+) -> anyhow::Result<BuildOutput> {
+    let process_count_i32 = i32::try_from(compiled_graph.processes.len())
+        .map_err(|_| anyhow::anyhow!("process overflow"))?;
+    let flow_count =
+        i32::try_from(compiled_graph.flows.len()).map_err(|_| anyhow::anyhow!("flow overflow"))?;
+    let mut flow_idx_by_id = HashMap::with_capacity(compiled_graph.flows.len());
+    for flow in &compiled_graph.flows {
+        flow_idx_by_id.insert(flow.flow_id, flow.flow_idx);
+    }
+
+    let mut a_map: HashMap<(i32, i32), f64> = HashMap::new();
+    for edge in &compiled_graph.technosphere_edges {
+        add_technosphere_edge(
+            &mut a_map,
+            edge.provider_idx,
+            edge.consumer_idx,
+            edge.amount,
+        );
+    }
+    let mut b_map: HashMap<(i32, i32), f64> = HashMap::new();
+    for edge in &compiled_graph.biosphere_edges {
+        if edge.amount.abs() > f64::EPSILON {
+            *b_map
+                .entry((edge.flow_idx, edge.process_idx))
+                .or_insert(0.0) += edge.amount;
         }
     }
 
@@ -1325,37 +1540,50 @@ async fn build_sparse_payload(
         1.0 - (m_nnz_estimated as f64 / (process_count_i64 * process_count_i64) as f64)
     };
 
-    let unique_provider_match_pct = pct(matched_unique, input_edges_total);
-    let any_provider_match_pct = pct(matched_unique + matched_multi, input_edges_total);
+    let unique_provider_match_pct = pct(
+        compiled_graph.matching_stats.matched_unique_provider,
+        compiled_graph.matching_stats.input_edges_total,
+    );
+    let any_provider_match_pct = pct(
+        compiled_graph.matching_stats.matched_unique_provider
+            + compiled_graph.matching_stats.matched_multi_provider,
+        compiled_graph.matching_stats.input_edges_total,
+    );
     let allocation_fraction_present_pct = pct(
-        allocation_stats.fraction_present_count,
-        allocation_stats.exchange_total,
+        compiled_graph.allocation_stats.fraction_present_count,
+        compiled_graph.allocation_stats.exchange_total,
     );
 
     let coverage = SnapshotCoverageReport {
         matching: SnapshotMatchingCoverage {
-            input_edges_total,
-            matched_unique_provider: matched_unique,
-            matched_multi_provider: matched_multi,
-            unmatched_no_provider: unmatched,
-            matched_multi_resolved,
-            matched_multi_unresolved,
-            matched_multi_fallback_equal,
-            a_input_edges_written,
+            input_edges_total: compiled_graph.matching_stats.input_edges_total,
+            matched_unique_provider: compiled_graph.matching_stats.matched_unique_provider,
+            matched_multi_provider: compiled_graph.matching_stats.matched_multi_provider,
+            unmatched_no_provider: compiled_graph.matching_stats.unmatched_no_provider,
+            matched_multi_resolved: compiled_graph.matching_stats.matched_multi_resolved,
+            matched_multi_unresolved: compiled_graph.matching_stats.matched_multi_unresolved,
+            matched_multi_fallback_equal: compiled_graph
+                .matching_stats
+                .matched_multi_fallback_equal,
+            a_input_edges_written: compiled_graph.matching_stats.a_input_edges_written,
             unique_provider_match_pct,
             any_provider_match_pct,
         },
         reference: SnapshotReferenceCoverage {
             process_total: process_count_i64,
-            normalized_process_count: reference_stats.normalized_processes,
-            missing_reference_count: reference_stats.missing_reference,
-            invalid_reference_count: reference_stats.invalid_reference,
+            normalized_process_count: compiled_graph.reference_stats.normalized_processes,
+            missing_reference_count: compiled_graph.reference_stats.missing_reference,
+            invalid_reference_count: compiled_graph.reference_stats.invalid_reference,
         },
         allocation: SnapshotAllocationCoverage {
-            exchange_total: allocation_stats.exchange_total,
+            exchange_total: compiled_graph.allocation_stats.exchange_total,
             allocation_fraction_present_pct,
-            allocation_fraction_missing_count: allocation_stats.fraction_missing_count,
-            allocation_fraction_invalid_count: allocation_stats.fraction_invalid_count,
+            allocation_fraction_missing_count: compiled_graph
+                .allocation_stats
+                .fraction_missing_count,
+            allocation_fraction_invalid_count: compiled_graph
+                .allocation_stats
+                .fraction_invalid_count,
         },
         singular_risk: SnapshotSingularRisk {
             risk_level,
@@ -1385,7 +1613,8 @@ async fn build_sparse_payload(
         biosphere_entries,
         characterization_factors,
     };
-    let process_map = process_meta
+    let process_map = compiled_graph
+        .processes
         .iter()
         .map(|meta| SnapshotProcessMapEntry {
             process_id: meta.process_id,
@@ -1748,6 +1977,15 @@ fn process_meta_for_idx(process_meta: &[ProcessMeta], process_idx: i32) -> Optio
     usize::try_from(process_idx)
         .ok()
         .and_then(|idx| process_meta.get(idx))
+}
+
+fn compiled_process_for_idx(
+    processes: &[CompiledProcess],
+    process_idx: i32,
+) -> Option<&CompiledProcess> {
+    usize::try_from(process_idx)
+        .ok()
+        .and_then(|idx| processes.get(idx))
 }
 
 #[derive(Debug, Clone)]

@@ -30,7 +30,8 @@ use crate::{
     },
 };
 
-const OPEN_DATA_STATE_CODES: [i32; 2] = [99, 100];
+const OPEN_DATA_STATE_CODE_START: i32 = 100;
+const OPEN_DATA_STATE_CODE_END: i32 = 199;
 const PACKAGE_MANIFEST_FORMAT: &str = "tiangong-tidas-package";
 const PACKAGE_MANIFEST_VERSION: u8 = 2;
 const PACKAGE_ZIP_COMPRESSION_LEVEL: i64 = 6;
@@ -817,6 +818,14 @@ async fn fetch_scope_root_refs(
     }
 }
 
+fn open_data_state_codes() -> Vec<i32> {
+    (OPEN_DATA_STATE_CODE_START..=OPEN_DATA_STATE_CODE_END).collect()
+}
+
+fn is_open_data_state_code(state_code: i32) -> bool {
+    (OPEN_DATA_STATE_CODE_START..=OPEN_DATA_STATE_CODE_END).contains(&state_code)
+}
+
 async fn fetch_scope_root_refs_single(
     pool: &PgPool,
     requested_by: Uuid,
@@ -833,7 +842,7 @@ async fn fetch_scope_root_refs_single(
             }
             PackageExportScope::OpenData => {
                 sqlx::query(&scope_root_refs_by_open_data_sql(table))
-                    .bind(OPEN_DATA_STATE_CODES.to_vec())
+                    .bind(open_data_state_codes())
                     .fetch_all(pool)
                     .await?
             }
@@ -916,7 +925,7 @@ async fn fetch_scope_seed_scan_batch_after_cursor(
         PackageExportScope::OpenData => {
             builder
                 .push("state_code = ANY(")
-                .push_bind(OPEN_DATA_STATE_CODES.to_vec())
+                .push_bind(open_data_state_codes())
                 .push("::int[])");
         }
         PackageExportScope::CurrentUserAndOpenData => {
@@ -924,7 +933,7 @@ async fn fetch_scope_seed_scan_batch_after_cursor(
                 .push("(user_id = ")
                 .push_bind(requested_by)
                 .push(" OR state_code = ANY(")
-                .push_bind(OPEN_DATA_STATE_CODES.to_vec())
+                .push_bind(open_data_state_codes())
                 .push("::int[]))");
         }
         PackageExportScope::SelectedRoots => {
@@ -2587,7 +2596,7 @@ async fn fetch_scope_entries(
             }
             PackageExportScope::OpenData => {
                 sqlx::query(select_by_open_data_sql(table))
-                    .bind(OPEN_DATA_STATE_CODES.to_vec())
+                    .bind(open_data_state_codes())
                     .fetch_all(pool)
                     .await?
             }
@@ -3516,10 +3525,7 @@ fn partition_conflicts_from_rows(
             state_code: row.state_code,
             user_id: row.user_id,
         };
-        if row
-            .state_code
-            .is_some_and(|state_code| OPEN_DATA_STATE_CODES.contains(&state_code))
-        {
+        if row.state_code.is_some_and(is_open_data_state_code) {
             sets.open_data_conflicts.push(record);
         } else {
             sets.user_conflicts.push(record);
@@ -4552,7 +4558,7 @@ mod tests {
             ConflictRow {
                 id,
                 version: "02.00.000".to_owned(),
-                state_code: Some(100),
+                state_code: Some(150),
                 user_id: None,
             },
         ];
@@ -4561,6 +4567,31 @@ mod tests {
             partition_conflicts_from_rows(PackageRootTable::Processes, &entries, &rows);
         assert_eq!(partitioned.open_data_conflicts.len(), 1);
         assert_eq!(partitioned.user_conflicts.len(), 0);
+    }
+
+    #[test]
+    fn partition_conflicts_treats_legacy_99_as_non_open_data() {
+        let id = Uuid::nil();
+        let entries = vec![PackageEntry {
+            table: PackageRootTable::Processes,
+            id,
+            version: "01.00.000".to_owned(),
+            json_ordered: json!({"name": "Process"}),
+            rule_verification: true,
+            json_tg: None,
+            model_id: None,
+        }];
+        let rows = vec![ConflictRow {
+            id,
+            version: "01.00.000".to_owned(),
+            state_code: Some(99),
+            user_id: None,
+        }];
+
+        let partitioned =
+            partition_conflicts_from_rows(PackageRootTable::Processes, &entries, &rows);
+        assert_eq!(partitioned.open_data_conflicts.len(), 0);
+        assert_eq!(partitioned.user_conflicts.len(), 1);
     }
 
     #[test]

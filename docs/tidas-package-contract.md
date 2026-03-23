@@ -72,6 +72,20 @@
 }
 ```
 
+## 6.3 `import_package` worker 执行顺序（新增）
+
+`import_package` 在 worker 侧执行时，必须先做结构化校验，再进入冲突检测/写库：
+
+1. 下载上传 ZIP artifact；
+2. 解压到临时目录；
+3. 调用 `python3 -m tidas_tools.validate --input-dir <dir> --format json`（允许按运行环境 fallback 到其他等价命令）；
+4. 解析结构化 JSON 校验报告；
+5. 若 `summary.error_count > 0`，直接产出 import report：
+   - `code = VALIDATION_FAILED`
+   - 不执行 conflict checks
+   - 不执行任何 inserts
+6. 若无校验错误，再执行现有冲突检测和导入流程。
+
 ## 7. Artifact 契约
 
 `lca_package_artifacts.artifact_kind`：
@@ -91,6 +105,27 @@
 
 - ZIP: `application/zip`
 - report: `application/json`
+
+### 7.1 import report payload（新增字段）
+
+`tidas-package-import-report:v1` 的 payload 结构扩展如下：
+
+- `summary.validation_issue_count`
+- `summary.error_count`
+- `summary.warning_count`
+- `validation_issues[]`
+
+`validation_issues[]` 每条包含：
+
+- `issue_code`
+- `severity`
+- `category`
+- `file_path`
+- `location`
+- `message`
+- `context`
+
+无论最终结果是 `IMPORTED` / `USER_DATA_CONFLICT` / `VALIDATION_FAILED`，report 都会携带校验统计；当 `VALIDATION_FAILED` 时，还会包含导致阻断导入的校验问题详情。
 
 ## 8. 状态机
 

@@ -261,9 +261,20 @@ Optional:
 - `S3_SESSION_TOKEN`
 - `S3_PREFIX` (default `lca-results`)
 
+Required runtime for package import validation:
+
+- `python3` available in worker runtime PATH
+- Python module `tidas_tools` installed (must support `python3 -m tidas_tools.validate --input-dir <dir> --format json`)
+- optional override: `TIDAS_VALIDATE_BIN` (custom validator command)
+
 Note:
 
 - Worker startup is expected to fail fast if required S3 config is missing.
+- package `import_package` job now executes validator-before-import:
+  - unzip source artifact to temp dir
+  - run structured validator JSON report
+  - if `summary.error_count > 0`, return import report `VALIDATION_FAILED` and skip both conflict checks and DB inserts
+  - import report payload always includes validation counters/details (`summary.validation_issue_count/error_count/warning_count` + `validation_issues`)
 
 ## 8. Operations runbook
 

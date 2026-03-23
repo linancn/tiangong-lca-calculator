@@ -13,14 +13,15 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
-use tempfile::TempDir;
+use tempfile::{Builder, NamedTempFile, TempDir};
 use uuid::Uuid;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     db::AppState,
     package_artifacts::{
-        encode_export_report_artifact, encode_import_report_artifact, encode_package_zip_artifact,
+        encode_export_report_artifact, encode_import_report_artifact,
+        prepare_package_zip_artifact_from_path,
     },
     package_db::{PackageArtifactInsert, insert_package_artifact},
     package_types::{
@@ -29,7 +30,8 @@ use crate::{
     },
 };
 
-const OPEN_DATA_STATE_CODES: [i32; 2] = [99, 100];
+const OPEN_DATA_STATE_CODE_START: i32 = 100;
+const OPEN_DATA_STATE_CODE_END: i32 = 199;
 const PACKAGE_MANIFEST_FORMAT: &str = "tiangong-tidas-package";
 const PACKAGE_MANIFEST_VERSION: u8 = 2;
 const PACKAGE_ZIP_COMPRESSION_LEVEL: i64 = 6;
@@ -440,18 +442,22 @@ pub async fn execute_export_package(
         fetch_export_entries_by_items(state, job_id, scope, root_count, &item_refs).await?;
     let manifest = build_manifest(scope, &roots, &entries);
     let filename = build_zip_filename(&roots, scope);
-    let zip_bytes = build_package_zip(&manifest, &entries)?;
-    let zip_artifact = encode_package_zip_artifact(zip_bytes);
-    let zip_url = state
+    let zip_file = build_package_zip(&manifest, &entries)?;
+    let zip_artifact = prepare_package_zip_artifact_from_path(zip_file.path())?;
+    let zip_upload = state
         .object_store
-        .upload_package_artifact(
+        .upload_package_artifact_file(
             job_id,
             EXPORT_ZIP_SUFFIX,
             zip_artifact.extension,
             zip_artifact.content_type,
-            zip_artifact.bytes.clone(),
+            zip_file.path(),
+            zip_artifact.byte_size,
         )
-        .await?;
+        .await
+        .context("failed to upload export package ZIP artifact")?;
+    let zip_url = zip_upload.object_url.clone();
+    let zip_artifact_byte_size = zip_artifact.byte_size;
     let zip_artifact_id = insert_package_artifact(
         &state.pool,
         PackageArtifactInsert::ready(
@@ -495,18 +501,18 @@ pub async fn execute_export_package(
         .await?;
     let report_artifact_id = insert_package_artifact(
         &state.pool,
-        PackageArtifactInsert::ready(
+        PackageArtifactInsert::ready_from_encoded(
             job_id,
             PackageArtifactKind::ExportReport,
             report_url.clone(),
-            report_artifact,
+            &report_artifact,
             json!({
                 "filename": format!("{filename}.report.json"),
                 "code": report_document.code,
                 "total_entries": entries.len(),
                 "root_count": roots.len(),
             }),
-        ),
+        )?,
     )
     .await?;
 
@@ -522,6 +528,9 @@ pub async fn execute_export_package(
             "total_entries": entries.len(),
             "root_count": roots.len(),
             "counts": manifest.counts,
+            "artifact_byte_size": zip_artifact_byte_size,
+            "upload_mode": zip_upload.upload_mode,
+            "multipart_part_count": zip_upload.part_count,
             "export_artifact_id": zip_artifact_id,
             "report_artifact_id": report_artifact_id,
             "export_artifact_url": zip_url,
@@ -809,6 +818,14 @@ async fn fetch_scope_root_refs(
     }
 }
 
+fn open_data_state_codes() -> Vec<i32> {
+    (OPEN_DATA_STATE_CODE_START..=OPEN_DATA_STATE_CODE_END).collect()
+}
+
+fn is_open_data_state_code(state_code: i32) -> bool {
+    (OPEN_DATA_STATE_CODE_START..=OPEN_DATA_STATE_CODE_END).contains(&state_code)
+}
+
 async fn fetch_scope_root_refs_single(
     pool: &PgPool,
     requested_by: Uuid,
@@ -825,7 +842,7 @@ async fn fetch_scope_root_refs_single(
             }
             PackageExportScope::OpenData => {
                 sqlx::query(&scope_root_refs_by_open_data_sql(table))
-                    .bind(OPEN_DATA_STATE_CODES.to_vec())
+                    .bind(open_data_state_codes())
                     .fetch_all(pool)
                     .await?
             }
@@ -908,7 +925,7 @@ async fn fetch_scope_seed_scan_batch_after_cursor(
         PackageExportScope::OpenData => {
             builder
                 .push("state_code = ANY(")
-                .push_bind(OPEN_DATA_STATE_CODES.to_vec())
+                .push_bind(open_data_state_codes())
                 .push("::int[])");
         }
         PackageExportScope::CurrentUserAndOpenData => {
@@ -916,7 +933,7 @@ async fn fetch_scope_seed_scan_batch_after_cursor(
                 .push("(user_id = ")
                 .push_bind(requested_by)
                 .push(" OR state_code = ANY(")
-                .push_bind(OPEN_DATA_STATE_CODES.to_vec())
+                .push_bind(open_data_state_codes())
                 .push("::int[]))");
         }
         PackageExportScope::SelectedRoots => {
@@ -1915,11 +1932,11 @@ pub async fn execute_import_package(
             .await?;
         let report_artifact_id = insert_package_artifact(
             &state.pool,
-            PackageArtifactInsert::ready(
+            PackageArtifactInsert::ready_from_encoded(
                 job_id,
                 PackageArtifactKind::ImportReport,
                 report_url.clone(),
-                report_artifact,
+                &report_artifact,
                 json!({
                     "code": report_document.code,
                     "total_entries": package_entries.len(),
@@ -1930,7 +1947,7 @@ pub async fn execute_import_package(
                     "user_conflict_count": 0,
                     "imported_count": 0,
                 }),
-            ),
+            )?,
         )
         .await?;
 
@@ -2016,11 +2033,11 @@ pub async fn execute_import_package(
         .await?;
     let report_artifact_id = insert_package_artifact(
         &state.pool,
-        PackageArtifactInsert::ready(
+        PackageArtifactInsert::ready_from_encoded(
             job_id,
             PackageArtifactKind::ImportReport,
             report_url.clone(),
-            report_artifact,
+            &report_artifact,
             json!({
                 "code": code,
                 "total_entries": package_entries.len(),
@@ -2031,7 +2048,7 @@ pub async fn execute_import_package(
                 "error_count": validation_report.summary.error_count,
                 "warning_count": validation_report.summary.warning_count,
             }),
-        ),
+        )?,
     )
     .await?;
 
@@ -2207,9 +2224,13 @@ fn build_manifest(
 fn build_package_zip(
     manifest: &PackageManifest,
     entries: &[PackageEntry],
-) -> anyhow::Result<Vec<u8>> {
-    let cursor = Cursor::new(Vec::new());
-    let mut writer = ZipWriter::new(cursor);
+) -> anyhow::Result<NamedTempFile> {
+    let temp = Builder::new()
+        .prefix("tidas-export-")
+        .suffix(".zip")
+        .tempfile()?;
+    let file = temp.reopen()?;
+    let mut writer = ZipWriter::new(file);
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .compression_level(Some(PACKAGE_ZIP_COMPRESSION_LEVEL));
@@ -2226,7 +2247,9 @@ fn build_package_zip(
             .write_all(serde_json::to_string_pretty(&serialize_entry_dataset(entry))?.as_bytes())?;
     }
 
-    Ok(writer.finish()?.into_inner())
+    let file = writer.finish()?;
+    file.sync_all()?;
+    Ok(temp)
 }
 
 fn parse_package_entries(zip_bytes: &[u8]) -> anyhow::Result<Vec<PackageEntry>> {
@@ -2573,7 +2596,7 @@ async fn fetch_scope_entries(
             }
             PackageExportScope::OpenData => {
                 sqlx::query(select_by_open_data_sql(table))
-                    .bind(OPEN_DATA_STATE_CODES.to_vec())
+                    .bind(open_data_state_codes())
                     .fetch_all(pool)
                     .await?
             }
@@ -3502,10 +3525,7 @@ fn partition_conflicts_from_rows(
             state_code: row.state_code,
             user_id: row.user_id,
         };
-        if row
-            .state_code
-            .is_some_and(|state_code| OPEN_DATA_STATE_CODES.contains(&state_code))
-        {
+        if row.state_code.is_some_and(is_open_data_state_code) {
             sets.open_data_conflicts.push(record);
         } else {
             sets.user_conflicts.push(record);
@@ -4538,7 +4558,7 @@ mod tests {
             ConflictRow {
                 id,
                 version: "02.00.000".to_owned(),
-                state_code: Some(100),
+                state_code: Some(150),
                 user_id: None,
             },
         ];
@@ -4547,6 +4567,31 @@ mod tests {
             partition_conflicts_from_rows(PackageRootTable::Processes, &entries, &rows);
         assert_eq!(partitioned.open_data_conflicts.len(), 1);
         assert_eq!(partitioned.user_conflicts.len(), 0);
+    }
+
+    #[test]
+    fn partition_conflicts_treats_legacy_99_as_non_open_data() {
+        let id = Uuid::nil();
+        let entries = vec![PackageEntry {
+            table: PackageRootTable::Processes,
+            id,
+            version: "01.00.000".to_owned(),
+            json_ordered: json!({"name": "Process"}),
+            rule_verification: true,
+            json_tg: None,
+            model_id: None,
+        }];
+        let rows = vec![ConflictRow {
+            id,
+            version: "01.00.000".to_owned(),
+            state_code: Some(99),
+            user_id: None,
+        }];
+
+        let partitioned =
+            partition_conflicts_from_rows(PackageRootTable::Processes, &entries, &rows);
+        assert_eq!(partitioned.open_data_conflicts.len(), 0);
+        assert_eq!(partitioned.user_conflicts.len(), 1);
     }
 
     #[test]

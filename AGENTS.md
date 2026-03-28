@@ -123,6 +123,8 @@ Behavior:
   - `split_by_evidence` (strict weighted split by geo+time score)
   - `split_by_evidence_hybrid` (weighted split, fallback to equal split)
   - `split_equal` (always equal split for multi-provider)
+  - persisted snapshot metadata default is `split_by_evidence_hybrid`
+  - `lca_network_snapshots.provider_matching_rule` must accept the current runtime rule set plus legacy persisted values (`equal_split_multi_provider`, `custom_weighted_provider`) for backward compatibility
 - quantitative reference normalization is applied at build time:
   - mode: `reference_normalization_mode=strict|lenient` (CLI, default `strict`)
   - strict: missing/invalid `referenceToReferenceFlow` or reference amount => fail snapshot build
@@ -211,6 +213,7 @@ Applied/expected migrations:
 - `20260308104000_lca_jobs_add_solve_all_unit.sql`
 - `20260319120000_tidas_package_job_tables.sql`
 - `20260319143000_tidas_package_export_items.sql`
+- `20260328170000_lca_snapshot_provider_rule_alignment.sql`
 
 Current runtime tables:
 

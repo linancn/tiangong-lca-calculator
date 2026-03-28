@@ -338,7 +338,7 @@ mod tests {
                 matched_multi_fallback_equal: 0,
                 a_input_edges_written: 8,
                 a_write_pct: 80.0,
-                provider_present_resolved_pct: 88.88888888888889,
+                provider_present_resolved_pct: 88.888_888_888_888_89,
                 unique_provider_match_pct: 70.0,
                 any_provider_match_pct: 90.0,
                 provider_decision_diagnostics: SnapshotProviderDecisionDiagnostics {

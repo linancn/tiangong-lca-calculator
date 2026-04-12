@@ -27,10 +27,7 @@ fn extract_snapshot_id(payload: &JobPayload) -> Option<Uuid> {
 }
 
 /// Fetches snapshot coverage from `lca_snapshot_artifacts` for richer error diagnostics.
-async fn fetch_snapshot_coverage(
-    pool: &sqlx::PgPool,
-    snapshot_id: Uuid,
-) -> Option<Value> {
+async fn fetch_snapshot_coverage(pool: &sqlx::PgPool, snapshot_id: Uuid) -> Option<Value> {
     sqlx::query_scalar::<_, Value>(
         "SELECT coverage FROM public.lca_snapshot_artifacts \
          WHERE snapshot_id = $1 AND status = 'ready' \
@@ -85,13 +82,8 @@ pub async fn run_worker_loop(
                             let diagnostics =
                                 build_failure_diagnostics(&state.pool, &payload, &err_message)
                                     .await;
-                            let _ = update_job_status(
-                                &state.pool,
-                                job_id,
-                                "failed",
-                                diagnostics,
-                            )
-                            .await;
+                            let _ =
+                                update_job_status(&state.pool, job_id, "failed", diagnostics).await;
                             let _ = mark_result_cache_failed(
                                 &state.pool,
                                 job_id,

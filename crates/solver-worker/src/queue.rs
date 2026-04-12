@@ -119,6 +119,83 @@ async fn detect_duplicate_exchange_processes(
     result.filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
 }
 
+/// Detects service-loop processes within a snapshot's scope.
+///
+/// A service-loop is when the same `flow_id` appears as both Input and Output
+/// in the same process with identical amounts — the process "provides to itself".
+/// This creates numerical instability (negative activities) in the solver.
+async fn detect_service_loop_processes(pool: &sqlx::PgPool, snapshot_id: Uuid) -> Option<Value> {
+    let result = sqlx::query_scalar::<_, Value>(
+        r"
+        WITH snapshot_scope AS (
+            SELECT
+                process_filter->>'include_user_id' AS uid,
+                process_filter->'process_states' AS states
+            FROM public.lca_network_snapshots
+            WHERE id = $1
+        ),
+        state_array AS (
+            SELECT array_agg(s::int) AS codes
+            FROM snapshot_scope, jsonb_array_elements_text(snapshot_scope.states) AS s
+        ),
+        scope_procs AS (
+            SELECT DISTINCT ON (p.id) p.id, p.version, p.json
+            FROM public.processes p, snapshot_scope ss, state_array sa
+            WHERE (p.state_code = ANY(sa.codes) OR p.user_id = ss.uid::uuid)
+              AND p.json ? 'processDataSet'
+            ORDER BY p.id, p.version DESC
+        ),
+        exchanges AS (
+            SELECT
+                sp.id AS process_id,
+                COALESCE(
+                    sp.json #>> '{processDataSet,processInformation,dataSetInformation,name,baseName}',
+                    ''
+                ) AS process_name,
+                ex.value ->> 'exchangeDirection' AS direction,
+                ex.value -> 'referenceToFlowDataSet' ->> '@refObjectId' AS flow_id,
+                COALESCE(
+                    ex.value -> 'referenceToFlowDataSet' -> 'common:shortDescription' ->> '#text',
+                    ex.value -> 'referenceToFlowDataSet' -> 'shortDescription' ->> '#text',
+                    ''
+                ) AS flow_name,
+                trim(replace(replace(
+                    COALESCE(ex.value ->> 'resultingAmount', ex.value ->> 'meanAmount', ''),
+                    chr(160), ''), ',', '')) AS amount_text
+            FROM scope_procs sp,
+            LATERAL jsonb_array_elements(
+                CASE jsonb_typeof(sp.json #> '{processDataSet,exchanges,exchange}')
+                    WHEN 'array' THEN sp.json #> '{processDataSet,exchanges,exchange}'
+                    ELSE '[]'::jsonb
+                END
+            ) ex(value)
+        )
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'process_id', i.process_id,
+            'process_name', i.process_name,
+            'flow_id', i.flow_id,
+            'flow_name', i.flow_name,
+            'amount', i.amount_text
+        ) ORDER BY i.process_id), '[]'::jsonb)
+        FROM exchanges i
+        JOIN exchanges o
+          ON i.process_id = o.process_id
+         AND i.flow_id = o.flow_id
+         AND i.direction = 'Input'
+         AND o.direction = 'Output'
+        WHERE i.amount_text <> ''
+          AND i.amount_text = o.amount_text
+        ",
+    )
+    .bind(snapshot_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    result.filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+}
+
 /// Builds enriched diagnostics JSON when a job fails with a factorization error.
 async fn build_failure_diagnostics(
     pool: &sqlx::PgPool,
@@ -127,7 +204,7 @@ async fn build_failure_diagnostics(
 ) -> Value {
     let mut diag = serde_json::json!({"error": err_message});
 
-    // For factorization/singular errors, attach snapshot coverage and duplicate process info.
+    // For factorization/singular errors, attach snapshot coverage and problem process info.
     if (err_message.contains("singular") || err_message.contains("factorization"))
         && let Some(snapshot_id) = extract_snapshot_id(payload)
     {
@@ -137,6 +214,9 @@ async fn build_failure_diagnostics(
         }
         if let Some(duplicates) = detect_duplicate_exchange_processes(pool, snapshot_id).await {
             diag["duplicate_exchange_processes"] = duplicates;
+        }
+        if let Some(loops) = detect_service_loop_processes(pool, snapshot_id).await {
+            diag["service_loop_processes"] = loops;
         }
     }
 

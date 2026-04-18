@@ -94,6 +94,13 @@ Route those tasks to:
   - `cargo clippy -p solver-worker --all-targets --all-features -- -D warnings`
   - `cargo fmt --all -- --check`
 
+## Operational Invariants
+
+- Solve result persistence is S3-only; `lca_results` stores artifact metadata and diagnostics, not inline payloads.
+- Queue enqueue and protected writes must stay on service-side paths; do not move them to frontend clients or authenticated direct table writes.
+- Runtime write paths assume `service_role` ownership boundaries and existing RLS restrictions on `lca_*` tables.
+- Worker and snapshot flows expect DB connectivity plus the required S3 env set: `DATABASE_URL` or `CONN`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY`.
+
 ## Hard Boundaries
 
 - Do not move solver or worker behavior into `edge-functions`

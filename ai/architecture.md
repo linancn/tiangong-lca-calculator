@@ -72,6 +72,8 @@ The worker currently covers families such as:
 - `solve_one`
 - `solve_batch`
 - `solve_all_unit`
+- `invalidate_factorization`
+- `rebuild_factorization`
 - `analyze_contribution_path`
 - `build_snapshot`
 
@@ -93,6 +95,12 @@ It also owns package-job artifacts and diagnostics.
 ### Result persistence
 
 Result artifacts are persisted through the worker and supporting runtime storage flows instead of inlining heavy compute payloads into the API layer.
+
+## Operational Baseline
+
+- Solve result persistence is S3-only; treat `lca_results` as artifact metadata plus diagnostics, not as an inline result store.
+- Queue enqueue and protected writes stay on service-side runtime paths guarded by existing RLS and `service_role` boundaries.
+- Worker and snapshot paths require DB connectivity plus the required S3 env set before runtime validation is meaningful.
 
 ## Runtime SQL Boundary
 

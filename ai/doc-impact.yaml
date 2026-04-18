@@ -1,0 +1,191 @@
+{
+  "version": 1,
+  "lastReviewedAt": "2026-04-18",
+  "lastReviewedCommit": "a1d53203bd75a9c7b839e48d2a75fda5c8b4dc4d",
+  "rules": [
+    {
+      "id": "calculator-bootstrap-contract",
+      "scope": "repo",
+      "repo": "calculator",
+      "triggers": [
+        {
+          "path": "AGENTS.md",
+          "kind": "doc-contract"
+        },
+        {
+          "path": "README.md",
+          "kind": "doc-entry"
+        },
+        {
+          "path": "docs/**",
+          "kind": "deep-doc"
+        },
+        {
+          "path": "ai/**",
+          "kind": "doc-ai-layer"
+        }
+      ],
+      "requiredDocs": [
+        {
+          "path": "AGENTS.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/repo.yaml",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/task-router.md",
+          "mode": "review_or_update"
+        }
+      ],
+      "reason": "Entry guidance, repo facts, and routing docs must stay aligned."
+    },
+    {
+      "id": "calculator-runtime-contract",
+      "scope": "repo",
+      "repo": "calculator",
+      "triggers": [
+        {
+          "path": "Cargo.toml",
+          "kind": "workspace-topology"
+        },
+        {
+          "path": "Makefile",
+          "kind": "validation-wrapper"
+        },
+        {
+          "path": "crates/**",
+          "kind": "runtime-code"
+        },
+        {
+          "path": ".github/workflows/**",
+          "kind": "ci"
+        }
+      ],
+      "requiredDocs": [
+        {
+          "path": "AGENTS.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/repo.yaml",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/task-router.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/validation.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/architecture.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "docs/lca-api-contract.md",
+          "mode": "review_or_update"
+        }
+      ],
+      "reason": "Solver and worker code changes alter the executable runtime contract and should refresh both the AI layer and the main API contract doc."
+    },
+    {
+      "id": "calculator-runtime-sql-boundary-contract",
+      "scope": "repo",
+      "repo": "calculator",
+      "triggers": [
+        {
+          "path": "supabase/migrations/**",
+          "kind": "runtime-sql"
+        },
+        {
+          "path": "docs/edge-function-integration.md",
+          "kind": "runtime-contract"
+        },
+        {
+          "path": "docs/frontend-integration.md",
+          "kind": "runtime-contract"
+        }
+      ],
+      "requiredDocs": [
+        {
+          "path": "AGENTS.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/repo.yaml",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/task-router.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/validation.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/architecture.md",
+          "mode": "review_or_update"
+        }
+      ],
+      "reason": "Runtime-facing SQL expectation changes should refresh the AI layer because durable schema governance lives in another repo."
+    },
+    {
+      "id": "calculator-script-and-package-contract",
+      "scope": "repo",
+      "repo": "calculator",
+      "triggers": [
+        {
+          "path": "scripts/**",
+          "kind": "manual-helper"
+        },
+        {
+          "path": "tools/bw25-validator/**",
+          "kind": "manual-helper"
+        },
+        {
+          "path": "docs/tidas-package-contract.md",
+          "kind": "runtime-contract"
+        },
+        {
+          "path": "docs/provider-linking-current-state.md",
+          "kind": "diagnostic-doc"
+        },
+        {
+          "path": "docs/provider-link-problem-process-diagnostics.md",
+          "kind": "diagnostic-doc"
+        },
+        {
+          "path": "docs/result-query-optimization.md",
+          "kind": "diagnostic-doc"
+        }
+      ],
+      "requiredDocs": [
+        {
+          "path": "AGENTS.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/repo.yaml",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/task-router.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/validation.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/architecture.md",
+          "mode": "review_or_update"
+        }
+      ],
+      "reason": "Manual validation, package flows, and diagnostics are part of the operator-facing calculator contract and should refresh the AI layer when they change."
+    }
+  ]
+}

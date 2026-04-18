@@ -60,6 +60,7 @@ When working inside `tiangong-lca-calculator`, load docs in this order:
 | Change manual debug or parity-validation helpers | `scripts/**`, `tools/bw25-validator/**` | `ai/validation.md`, `ai/architecture.md` | These scripts are part of the calculator operator surface. |
 | Change request normalization, auth, enqueue API, or polling API behavior | `edge-functions`, not this repo | root `ai/task-router.md`, `tiangong-lca-edge-functions/AGENTS.md` | Edge owns the API runtime surface. |
 | Change durable schema, migrations, RPCs, policies, or Supabase branch config | `database-engine`, not this repo | root `ai/task-router.md`, `database-engine/AGENTS.md` | Calculator depends on that truth but does not own it. |
+| Change repo-local AI-doc maintenance only | `AGENTS.md`, `ai/**`, `.github/workflows/ai-doc-lint.yml`, `.github/scripts/ai-doc-lint.*` | `ai/validation.md` when present, otherwise `ai/repo.yaml` | Keep the repo-local maintenance gate aligned with root `ai/ci-lint-spec.md` and `ai/review-matrix.md`. |
 | Decide whether work is delivery-complete after merge | root workspace docs, not repo code paths | root `AGENTS.md`, `_docs/workspace-branch-policy-contract.md` | Root integration remains a separate phase. |
 
 ## Wrong Turns To Avoid

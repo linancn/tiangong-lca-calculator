@@ -94,6 +94,8 @@ Route those tasks to:
   - `cargo clippy -p solver-worker --all-targets --all-features -- -D warnings`
   - `cargo fmt --all -- --check`
 
+- Repo-local AI-doc maintenance is enforced by `.github/workflows/ai-doc-lint.yml` using the vendored `.github/scripts/ai-doc-lint.*` files.
+
 ## Operational Invariants
 
 - Solve result persistence is S3-only; `lca_results` stores artifact metadata and diagnostics, not inline payloads.

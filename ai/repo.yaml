@@ -145,7 +145,7 @@
       "notes": [
         "Use the manual helper scripts when the task touches snapshot building, BW25 parity, LCIA targets, or provider-link diagnostics.",
         "Record separately when a change also requires durable schema proof in database-engine.",
-        "AI-doc changes should still run the root warning-only ai-doc-lint."
+        "AI-doc changes should still run the repo-local ai-doc-lint workflow or the equivalent local node command."
       ]
     }
   }

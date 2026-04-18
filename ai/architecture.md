@@ -99,6 +99,7 @@ Result artifacts are persisted through the worker and supporting runtime storage
 ## Operational Baseline
 
 - Solve result persistence is S3-only; treat `lca_results` as artifact metadata plus diagnostics, not as an inline result store.
+- The worker DB pool currently uses a 5-minute idle timeout and a 30-minute max lifetime; keep equivalent long-running job headroom if you retune the pool.
 - Queue enqueue and protected writes stay on service-side runtime paths guarded by existing RLS and `service_role` boundaries.
 - Worker and snapshot paths require DB connectivity plus the required S3 env set before runtime validation is meaningful.
 

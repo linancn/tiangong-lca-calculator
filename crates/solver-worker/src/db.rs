@@ -57,8 +57,8 @@ impl AppState {
             .max_connections(8)
             .min_connections(1)
             .acquire_timeout(Duration::from_secs(30))
-            .idle_timeout(Duration::from_secs(300))
-            .max_lifetime(Duration::from_secs(1_800))
+            .idle_timeout(Duration::from_mins(5))
+            .max_lifetime(Duration::from_mins(30))
             .test_before_acquire(true)
             .connect(config.resolved_database_url()?)
             .await?;

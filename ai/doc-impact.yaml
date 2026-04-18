@@ -186,6 +186,44 @@
         }
       ],
       "reason": "Manual validation, package flows, and diagnostics are part of the operator-facing calculator contract and should refresh the AI layer when they change."
+    },
+    {
+      "id": "calculator-ai-doc-maintenance-contract",
+      "scope": "repo",
+      "repo": "calculator",
+      "triggers": [
+        {
+          "path": ".github/workflows/ai-doc-lint.yml",
+          "kind": "automation"
+        },
+        {
+          "path": ".github/scripts/ai-doc-lint.mjs",
+          "kind": "automation"
+        },
+        {
+          "path": ".github/scripts/ai-doc-lint.test.mjs",
+          "kind": "automation"
+        }
+      ],
+      "requiredDocs": [
+        {
+          "path": "AGENTS.md",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/repo.yaml",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/doc-impact.yaml",
+          "mode": "review_or_update"
+        },
+        {
+          "path": "ai/validation.md",
+          "mode": "review_or_update"
+        }
+      ],
+      "reason": "Repo-local AI doc maintenance automation changes alter the maintenance gate and should refresh the AI contract docs."
     }
   ]
 }

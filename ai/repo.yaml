@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "lastReviewedAt": "2026-04-18",
+  "lastReviewedCommit": "a1d53203bd75a9c7b839e48d2a75fda5c8b4dc4d",
+  "repo": {
+    "id": "calculator",
+    "path": "tiangong-lca-calculator",
+    "canonicalRepo": "linancn/tiangong-lca-calculator",
+    "purpose": "Sparse-solver runtime and worker repository for TianGong LCA.",
+    "entryDoc": "AGENTS.md",
+    "taskRouterDoc": "ai/task-router.md",
+    "validationDoc": "ai/validation.md",
+    "architectureDoc": "ai/architecture.md",
+    "readmeDoc": "README.md",
+    "defaultBranch": "main",
+    "dailyTrunk": "main",
+    "routinePrBase": "main",
+    "branchModel": "M1",
+    "workspaceIntegrationRequired": true,
+    "rootIntegrationRule": "lca-workspace/main may bump merged main-branch solver snapshots when the workspace intends to ship the updated calculation runtime.",
+    "trackedBy": {
+      "workspaceParentIssue": "https://github.com/tiangong-lca/workspace/issues/73",
+      "repoIssue": "https://github.com/linancn/tiangong-lca-calculator/issues/30"
+    },
+    "runtime": {
+      "language": "Rust workspace with helper scripts",
+      "baselineValidationCommands": [
+        "make check",
+        "cargo clippy -p solver-worker --all-targets --all-features -- -D warnings",
+        "cargo fmt --all -- --check"
+      ],
+      "manualValidationHelpers": [
+        "./scripts/validate_additive_migration.sh",
+        "./scripts/build_snapshot_from_ilcd.sh",
+        "./scripts/run_full_compute_debug.sh",
+        "./scripts/run_bw25_validation.sh",
+        "./scripts/validate_lcia_targets.sh",
+        "./scripts/gc_lca_results.sh",
+        "./scripts/export_latest_matrices.sh",
+        "./scripts/export_provider_link_diagnostics.sh",
+        "./scripts/export_unmatched_no_provider_diagnostics.sh"
+      ]
+    },
+    "sourceOfTruth": {
+      "stableManualEditPaths": [
+        {
+          "path": "Cargo.toml",
+          "role": "workspace membership and crate topology"
+        },
+        {
+          "path": "crates/suitesparse-ffi/**",
+          "role": "CSC matrix representation and SuiteSparse bindings"
+        },
+        {
+          "path": "crates/solver-core/**",
+          "role": "matrix build, factorization cache, solve orchestration, and provider matching"
+        },
+        {
+          "path": "crates/solver-worker/**",
+          "role": "queue workers, package worker, snapshot builder, and persistence"
+        },
+        {
+          "path": "scripts/**",
+          "role": "manual validation, debug, snapshot, and diagnostics helpers"
+        },
+        {
+          "path": "tools/bw25-validator/**",
+          "role": "manual Brightway comparison tool"
+        },
+        {
+          "path": "docs/**",
+          "role": "runtime-facing contract and investigation docs"
+        },
+        {
+          "path": "supabase/migrations/**",
+          "role": "local runtime-facing SQL expectations still referenced by the calculator runtime"
+        }
+      ],
+      "nonOwnerBoundaries": [
+        {
+          "repo": "edge-functions",
+          "doesNotOwn": [
+            "request normalization",
+            "frontend-facing auth",
+            "enqueue and polling API behavior"
+          ]
+        },
+        {
+          "repo": "database-engine",
+          "doesNotOwn": [
+            "durable schema governance",
+            "migrations as workspace-wide source of truth",
+            "Supabase branch governance"
+          ]
+        },
+        {
+          "repo": "lca-workspace",
+          "doesNotOwn": [
+            "root integration state",
+            "submodule pointer updates"
+          ]
+        }
+      ]
+    },
+    "taskHotspots": [
+      {
+        "topic": "solver runtime and queue behavior",
+        "paths": [
+          "crates/solver-core/**",
+          "crates/solver-worker/src/**"
+        ]
+      },
+      {
+        "topic": "snapshot build, provider matching, and contribution-path analysis",
+        "paths": [
+          "crates/solver-worker/src/bin/snapshot_builder.rs",
+          "crates/solver-worker/src/types.rs",
+          "scripts/build_snapshot_from_ilcd.sh",
+          "scripts/export_provider_link_diagnostics.sh"
+        ]
+      },
+      {
+        "topic": "package worker import or export flows",
+        "paths": [
+          "crates/solver-worker/src/bin/package_worker.rs",
+          "docs/tidas-package-contract.md"
+        ]
+      },
+      {
+        "topic": "runtime SQL expectations and additive migration checks",
+        "paths": [
+          "supabase/migrations/**",
+          "scripts/validate_additive_migration.sh",
+          "docs/edge-function-integration.md",
+          "docs/frontend-integration.md"
+        ]
+      }
+    ],
+    "validation": {
+      "baselineLocalCommands": [
+        "make check",
+        "cargo clippy -p solver-worker --all-targets --all-features -- -D warnings",
+        "cargo fmt --all -- --check"
+      ],
+      "notes": [
+        "Use the manual helper scripts when the task touches snapshot building, BW25 parity, LCIA targets, or provider-link diagnostics.",
+        "Record separately when a change also requires durable schema proof in database-engine.",
+        "AI-doc changes should still run the repo-local ai-doc-lint workflow or the equivalent local node command."
+      ]
+    }
+  }
+}

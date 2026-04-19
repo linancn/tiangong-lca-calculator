@@ -7,6 +7,7 @@
 - 数值核心固定为 `M = I - A`，只解 `M x = y`。
 - `snapshot_builder` 对 elementary flow 的 `B` 采用 `gross` 口径（`Input/Output` 均按原始 `amount` 入模，不做方向符号翻转）。
 - 计算入口是异步 `lca_jobs` + `pgmq`，不走前端直连队列。
+- worker 连接池当前默认采用 `idle_timeout = 5min` 与 `max_lifetime = 30min`，以保证长时求解与 artifact 落盘阶段有稳定连接窗口。
 - 主路径读取 `lca_snapshot_artifacts`（artifact-first），旧 `lca_*_entries` 仅兼容回退。
 - 所有写操作由服务端（Edge Function / worker，`service_role`）执行。
 

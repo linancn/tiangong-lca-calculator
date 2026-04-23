@@ -1,6 +1,57 @@
+---
+title: Tiangong LCA Calculator Landing
+docType: overview
+scope: repo
+status: active
+authoritative: false
+owner: calculator
+language: zh-CN
+whenToUse:
+  - 当你需要这个仓库最短的高层说明时
+  - 当你刚进入仓库但暂时不需要完整 AI contract surface 时
+whenToUpdate:
+  - 当仓库定位、运行时概览、对接文档入口或 AI entry surface 发生变化时
+checkPaths:
+  - README.md
+  - AGENTS.md
+  - .docpact/config.yaml
+  - docs/agents/**
+  - docs/lca-api-contract.md
+  - docs/edge-function-integration.md
+  - docs/frontend-integration.md
+  - docs/tidas-package-contract.md
+lastReviewedAt: 2026-04-23
+lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
+related:
+  - AGENTS.md
+  - .docpact/config.yaml
+  - docs/agents/repo-validation.md
+  - docs/agents/repo-architecture.md
+  - docs/lca-api-contract.md
+  - docs/edge-function-integration.md
+  - docs/frontend-integration.md
+  - docs/tidas-package-contract.md
+---
+
 # Tiangong LCA Calculator
 
 面向 Supabase + Rust + SuiteSparse 的大规模 LCA 稀疏求解服务。
+
+## AI Docs Entry
+
+面向 AI 的 checked-in contract layer 从这里开始：
+
+1. `AGENTS.md`
+2. `.docpact/config.yaml`
+3. `docs/agents/repo-validation.md`
+4. `docs/agents/repo-architecture.md`
+5. 再按任务加载对应窄契约：
+   - `docs/lca-api-contract.md`
+   - `docs/edge-function-integration.md`
+   - `docs/frontend-integration.md`
+   - `docs/tidas-package-contract.md`
+
+这些文件构成低熵入口面：repo ownership、routing、validation、runtime boundary 先读这里；`README.md` 继续承担更长的运行时概览和操作说明。
 
 ## 0. 对接文档（给 Edge / 前端）
 

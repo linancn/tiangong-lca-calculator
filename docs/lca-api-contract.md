@@ -1,3 +1,34 @@
+---
+title: LCA API Contract
+docType: contract
+scope: repo
+status: active
+authoritative: true
+owner: calculator
+language: zh-CN
+whenToUse:
+  - 当你需要共享的 jobs/results/payload/status 契约时
+  - 当 edge-functions 或前端的集成行为依赖 calculator runtime 输出语义时
+whenToUpdate:
+  - 当 job payload、状态机、结果 artifact、幂等规则或服务端权限边界变化时
+checkPaths:
+  - docs/lca-api-contract.md
+  - AGENTS.md
+  - .docpact/config.yaml
+  - crates/**
+  - supabase/migrations/**
+  - docs/edge-function-integration.md
+  - docs/frontend-integration.md
+lastReviewedAt: 2026-04-23
+lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
+related:
+  - AGENTS.md
+  - .docpact/config.yaml
+  - docs/edge-function-integration.md
+  - docs/frontend-integration.md
+  - docs/agents/repo-validation.md
+---
+
 # LCA API Contract (Snapshot-First)
 
 本文档定义本项目当前可用的作业/结果契约，供 Edge Function 与前端共用。

@@ -1,3 +1,32 @@
+---
+title: Edge Function Integration Guide
+docType: contract
+scope: repo
+status: active
+authoritative: true
+owner: calculator
+language: zh-CN
+whenToUse:
+  - 当你需要把 edge-functions 请求稳定映射到 calculator 异步求解链路时
+  - 当 enqueue、polling、service-role、request_key 或 snapshot 选择规则变化时
+whenToUpdate:
+  - 当 edge-facing solve API、入队流程、worker 边界或错误处理约定变化时
+checkPaths:
+  - docs/edge-function-integration.md
+  - AGENTS.md
+  - .docpact/config.yaml
+  - docs/lca-api-contract.md
+  - crates/**
+  - supabase/migrations/**
+lastReviewedAt: 2026-04-23
+lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
+related:
+  - AGENTS.md
+  - .docpact/config.yaml
+  - docs/lca-api-contract.md
+  - docs/frontend-integration.md
+---
+
 # Edge Function Integration Guide
 
 本文档给 Supabase Edge Functions 项目使用，目标是把前端请求稳定地映射到 `lca_jobs + pgmq` 异步链路。

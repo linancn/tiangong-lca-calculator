@@ -1,0 +1,328 @@
+version: 1
+layout: repo
+lastReviewedAt: 2026-04-23
+lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
+
+# Keep deterministic governance facts here.
+# AGENTS.md remains the repo contract entrypoint.
+# Narrow source docs keep proof, repo-shape, and consumer-facing contract details.
+catalog:
+  repos:
+    - id: calculator
+      path: .
+      canonicalRepo: linancn/tiangong-lca-calculator
+      entryDoc: AGENTS.md
+      workflowDocs:
+        - docs/agents/repo-validation.md
+        - docs/agents/repo-architecture.md
+      workspaceIntegrationRequired: true
+
+ownership:
+  domains:
+    - id: repo-governance-and-docs
+      paths:
+        include:
+          - AGENTS.md
+          - README.md
+          - .docpact/**
+          - docs/agents/**
+          - docs/lca-api-contract.md
+          - docs/edge-function-integration.md
+          - docs/frontend-integration.md
+          - docs/tidas-package-contract.md
+          - .github/workflows/ai-doc-lint.yml
+      ownerRepo: calculator
+    - id: solver-runtime-and-ci
+      paths:
+        include:
+          - Cargo.toml
+          - Makefile
+          - crates/**
+          - .github/workflows/ci.yml
+      ownerRepo: calculator
+    - id: validation-debug-and-diagnostics-tooling
+      paths:
+        include:
+          - scripts/**
+          - tools/bw25-validator/**
+      ownerRepo: calculator
+    - id: runtime-sql-expectations
+      paths:
+        include:
+          - supabase/migrations/**
+      ownerRepo: calculator
+
+coverage:
+  include:
+    - AGENTS.md
+    - README.md
+    - .docpact/**
+    - docs/agents/repo-validation.md
+    - docs/agents/repo-architecture.md
+    - docs/lca-api-contract.md
+    - docs/edge-function-integration.md
+    - docs/frontend-integration.md
+    - docs/tidas-package-contract.md
+    - Cargo.toml
+    - Makefile
+    - crates/**
+    - scripts/**
+    - tools/bw25-validator/**
+    - supabase/migrations/**
+    - .github/workflows/ai-doc-lint.yml
+    - .github/workflows/ci.yml
+  exclude:
+    - .git/**
+    - .github/scripts/**
+    - target/**
+    - logs/**
+    - reports/**
+
+freshness:
+  warn_after_commits: 40
+  warn_after_days: 60
+  critical_after_days: 120
+
+routing:
+  intents:
+    solver-runtime:
+      paths:
+        - Cargo.toml
+        - Makefile
+        - crates/suitesparse-ffi/**
+        - crates/solver-core/**
+        - crates/solver-worker/src/**
+        - docs/lca-api-contract.md
+    snapshot-and-provider:
+      paths:
+        - crates/solver-worker/src/bin/snapshot_builder.rs
+        - crates/solver-worker/src/types.rs
+        - scripts/build_snapshot_from_ilcd.sh
+        - scripts/export_provider_link_diagnostics.sh
+        - scripts/export_unmatched_no_provider_diagnostics.sh
+        - docs/agents/repo-architecture.md
+    package-worker:
+      paths:
+        - crates/solver-worker/src/bin/package_worker.rs
+        - docs/tidas-package-contract.md
+    runtime-sql-boundary:
+      paths:
+        - supabase/migrations/**
+        - scripts/validate_additive_migration.sh
+        - docs/edge-function-integration.md
+        - docs/frontend-integration.md
+    debug-and-parity:
+      paths:
+        - scripts/**
+        - tools/bw25-validator/**
+    edge-api-boundary:
+      paths:
+        - docs/lca-api-contract.md
+        - docs/edge-function-integration.md
+    frontend-integration:
+      paths:
+        - docs/lca-api-contract.md
+        - docs/frontend-integration.md
+    proof:
+      paths:
+        - docs/agents/repo-validation.md
+        - Cargo.toml
+        - Makefile
+        - crates/**
+        - scripts/**
+        - tools/bw25-validator/**
+        - supabase/migrations/**
+        - .github/workflows/ci.yml
+    repo-docs:
+      paths:
+        - AGENTS.md
+        - README.md
+        - .docpact/**
+        - docs/agents/**
+        - docs/lca-api-contract.md
+        - docs/edge-function-integration.md
+        - docs/frontend-integration.md
+        - docs/tidas-package-contract.md
+    root-integration:
+      paths:
+        - AGENTS.md
+
+docInventory:
+  include:
+    - AGENTS.md
+    - README.md
+    - .docpact/config.yaml
+    - docs/agents/repo-validation.md
+    - docs/agents/repo-architecture.md
+    - docs/lca-api-contract.md
+    - docs/edge-function-integration.md
+    - docs/frontend-integration.md
+    - docs/tidas-package-contract.md
+
+repo:
+  id: calculator
+  owner: calculator
+
+rules:
+  - id: calculator-bootstrap-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: AGENTS.md
+        kind: doc-contract
+      - path: .docpact/**
+        kind: doc-ai-layer
+      - path: docs/agents/repo-validation.md
+        kind: deep-doc
+      - path: docs/agents/repo-architecture.md
+        kind: deep-doc
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+    reason: Repo entry guidance, machine-readable routing, and retained source docs must stay aligned.
+  - id: calculator-readme-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: README.md
+        kind: repo-landing
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: README.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+    reason: Repo landing text should stay aligned with the current contract and AI entry surface.
+  - id: calculator-runtime-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: Cargo.toml
+        kind: workspace-topology
+      - path: Makefile
+        kind: validation-wrapper
+      - path: crates/**
+        kind: runtime-code
+      - path: .github/workflows/ci.yml
+        kind: automation
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+      - path: docs/lca-api-contract.md
+        mode: review_or_update
+    reason: Solver runtime, worker behavior, and CI gates shape ownership, proof, and the shared runtime contract together.
+  - id: calculator-debug-and-tooling-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: scripts/**
+        kind: tooling
+      - path: tools/bw25-validator/**
+        kind: tooling
+    requiredDocs:
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+    reason: Manual validation helpers and diagnostics tooling define how calculator changes are proved and debugged.
+  - id: calculator-runtime-sql-boundary-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: supabase/migrations/**
+        kind: runtime-sql
+    requiredDocs:
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+      - path: docs/edge-function-integration.md
+        mode: review_or_update
+      - path: docs/frontend-integration.md
+        mode: review_or_update
+    reason: Local runtime-facing SQL expectations can alter validation guidance and the calculator-to-consumer boundary without becoming durable schema truth.
+  - id: calculator-lca-api-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: docs/lca-api-contract.md
+        kind: runtime-contract
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/lca-api-contract.md
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Shared jobs, payload, and result semantics must stay aligned with repo runtime and proof guidance.
+  - id: calculator-edge-frontend-integration-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: docs/edge-function-integration.md
+        kind: runtime-contract
+      - path: docs/frontend-integration.md
+        kind: runtime-contract
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/lca-api-contract.md
+        mode: review_or_update
+      - path: docs/edge-function-integration.md
+        mode: review_or_update
+      - path: docs/frontend-integration.md
+        mode: review_or_update
+    reason: Consumer-repo integration guidance must stay aligned with the current solver contract and repo boundaries.
+  - id: calculator-tidas-package-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: docs/tidas-package-contract.md
+        kind: runtime-contract
+      - path: crates/solver-worker/src/bin/package_worker.rs
+        kind: runtime-code
+    requiredDocs:
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+      - path: docs/tidas-package-contract.md
+        mode: review_or_update
+    reason: Package-worker behavior and async import or export semantics need an explicit retained contract surface.
+  - id: calculator-doc-maintenance-contract
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: .github/workflows/ai-doc-lint.yml
+        kind: automation
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Repo-local documentation maintenance automation must stay aligned with the repo contract and governed-doc rules.

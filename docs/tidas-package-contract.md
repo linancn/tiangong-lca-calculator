@@ -1,3 +1,31 @@
+---
+title: TIDAS Package Async Contract
+docType: contract
+scope: repo
+status: active
+authoritative: true
+owner: calculator
+language: zh-CN
+whenToUse:
+  - 当你需要 package-worker 的异步 import/export 契约时
+  - 当 package jobs、artifacts、request cache 或 import validation 规则变化时
+whenToUpdate:
+  - 当 package-worker payload、artifact 格式、状态机或权限边界变化时
+checkPaths:
+  - docs/tidas-package-contract.md
+  - AGENTS.md
+  - .docpact/config.yaml
+  - crates/solver-worker/**
+  - docs/agents/repo-validation.md
+lastReviewedAt: 2026-04-23
+lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
+related:
+  - AGENTS.md
+  - .docpact/config.yaml
+  - docs/agents/repo-validation.md
+  - docs/agents/repo-architecture.md
+---
+
 # TIDAS Package Async Contract
 
 本文档定义 TIDAS 数据包异步导入/导出在 `tiangong-lca-calculator` 中的 worker、表结构与 artifact 契约。

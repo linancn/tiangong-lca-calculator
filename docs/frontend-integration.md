@@ -1,3 +1,31 @@
+---
+title: Frontend Integration Guide
+docType: contract
+scope: repo
+status: active
+authoritative: true
+owner: calculator
+language: zh-CN
+whenToUse:
+  - 当你需要给前端消费方说明 solve/result 交互契约时
+  - 当 job 状态展示、轮询策略、artifact 读取或幂等键策略变化时
+whenToUpdate:
+  - 当前端侧交互流程、结果读取方式或错误处理约定变化时
+checkPaths:
+  - docs/frontend-integration.md
+  - AGENTS.md
+  - .docpact/config.yaml
+  - docs/lca-api-contract.md
+  - docs/edge-function-integration.md
+lastReviewedAt: 2026-04-23
+lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
+related:
+  - AGENTS.md
+  - .docpact/config.yaml
+  - docs/lca-api-contract.md
+  - docs/edge-function-integration.md
+---
+
 # Frontend Integration Guide
 
 本文档给前端项目使用，目标是稳定触发 LCA 异步计算并正确展示结果。

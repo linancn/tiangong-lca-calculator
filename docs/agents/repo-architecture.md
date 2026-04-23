@@ -15,20 +15,22 @@ whenToUpdate:
   - when result persistence or runtime SQL boundaries move
   - when the current map becomes misleading
 checkPaths:
-  - ai/architecture.md
-  - ai/repo.yaml
+  - docs/agents/repo-architecture.md
+  - .docpact/config.yaml
   - Cargo.toml
   - crates/**
   - scripts/**
+  - tools/bw25-validator/**
   - supabase/migrations/**
-lastReviewedAt: 2026-04-18
-lastReviewedCommit: a1d53203bd75a9c7b839e48d2a75fda5c8b4dc4d
+  - docs/lca-api-contract.md
+  - docs/tidas-package-contract.md
+lastReviewedAt: 2026-04-23
+lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
 related:
-  - ../AGENTS.md
-  - ./repo.yaml
-  - ./task-router.md
-  - ./validation.md
-  - ../docs/lca-api-contract.md
+  - ../../AGENTS.md
+  - ../../.docpact/config.yaml
+  - ./repo-validation.md
+  - ../../docs/lca-api-contract.md
 ---
 
 ## Repo Shape
@@ -60,7 +62,10 @@ Keep these constraints in mind before editing `crates/solver-core/**` or worker 
 | `scripts/**` | manual validation, debug, diagnostics, and snapshot helpers |
 | `tools/bw25-validator/**` | manual Brightway comparison tooling |
 | `supabase/migrations/**` | local runtime-facing SQL expectations referenced by the calculator runtime |
-| `docs/**` | runtime-facing contract and investigation docs |
+| `docs/lca-api-contract.md` | shared jobs/results/payload/status contract for edge and frontend consumers |
+| `docs/edge-function-integration.md` | edge-facing enqueue, polling, and service-role integration contract |
+| `docs/frontend-integration.md` | frontend-side solve/result interaction contract |
+| `docs/tidas-package-contract.md` | package-worker async import/export contract |
 
 ## Current Runtime Families
 

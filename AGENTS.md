@@ -30,8 +30,8 @@ checkPaths:
   - tools/bw25-validator/**
   - supabase/migrations/**
   - .github/workflows/**
-lastReviewedAt: 2026-04-23
-lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
+lastReviewedAt: 2026-04-24
+lastReviewedCommit: b71d784edd9ae151511d3712b803d06b79dfd165
 related:
   - .docpact/config.yaml
   - docs/agents/repo-validation.md

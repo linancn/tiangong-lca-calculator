@@ -28,8 +28,11 @@ checkPaths:
   - docs/frontend-integration.md
   - docs/tidas-package-contract.md
   - .github/workflows/**
-lastReviewedAt: 2026-04-24
-lastReviewedCommit: b71d784edd9ae151511d3712b803d06b79dfd165
+  - .githooks/pre-push
+  - scripts/docpact-gate.sh
+  - scripts/install-git-hooks.sh
+lastReviewedAt: 2026-05-08
+lastReviewedCommit: 37a158e4817ee71553c7fcec746728cd6d5b7be0
 related:
   - ../../AGENTS.md
   - ../../.docpact/config.yaml
@@ -80,3 +83,13 @@ That means:
 - retained explanatory docs stay in `AGENTS.md`, this file, `repo-architecture.md`, `README.md`, and the narrow runtime-facing contract docs under `docs/*.md`
 
 Do not recreate deleted `ai/*` files under a new name. Keep deterministic facts in config and explanatory material in retained source docs.
+
+## Local Docpact Push Gate
+
+Install the versioned local hook once per checkout:
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+The `pre-push` hook runs `scripts/docpact-gate.sh`, which performs strict config validation and `docpact lint --mode enforce` before the push leaves the machine. The default comparison base is `origin/main`. Override it for unusual stacks with `DOCPACT_BASE_REF=<ref>` or `scripts/docpact-gate.sh --base <ref>`. The gate writes its detailed report to a temporary file so normal pushes do not create `.docpact/runs/` artifacts.

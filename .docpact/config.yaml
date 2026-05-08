@@ -1,7 +1,7 @@
 version: 1
 layout: repo
-lastReviewedAt: "2026-04-24"
-lastReviewedCommit: "b71d784edd9ae151511d3712b803d06b79dfd165"
+lastReviewedAt: 2026-05-08
+lastReviewedCommit: 37a158e4817ee71553c7fcec746728cd6d5b7be0
 
 # Keep deterministic governance facts here.
 # AGENTS.md remains the repo contract entrypoint.
@@ -52,8 +52,19 @@ ownership:
           - supabase/migrations/**
       ownerRepo: calculator
 
+    - id: local-docpact-push-gate
+      paths:
+        include:
+          - .githooks/**
+          - scripts/docpact-gate.sh
+          - scripts/install-git-hooks.sh
+      ownerRepo: calculator
+
 coverage:
   include:
+    - .githooks/**
+    - scripts/docpact-gate.sh
+    - scripts/install-git-hooks.sh
     - AGENTS.md
     - README.md
     - .docpact/**
@@ -85,6 +96,11 @@ freshness:
 
 routing:
   intents:
+    local-docpact-gate:
+      paths:
+        - .githooks/pre-push
+        - scripts/docpact-gate.sh
+        - scripts/install-git-hooks.sh
     solver-runtime:
       paths:
         - Cargo.toml
@@ -326,3 +342,19 @@ rules:
       - path: docs/agents/repo-validation.md
         mode: review_or_update
     reason: Repo-local documentation maintenance automation must stay aligned with the repo contract and governed-doc rules.
+  - id: calculator-local-docpact-push-gate
+    scope: repo
+    repo: calculator
+    triggers:
+      - path: .githooks/pre-push
+        kind: local-git-hook
+      - path: scripts/docpact-gate.sh
+        kind: local-automation
+      - path: scripts/install-git-hooks.sh
+        kind: local-automation
+    requiredDocs:
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Local push documentation governance gates must stay aligned with repo validation guidance and docpact configuration.

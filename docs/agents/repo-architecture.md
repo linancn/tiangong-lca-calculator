@@ -24,8 +24,11 @@ checkPaths:
   - supabase/migrations/**
   - docs/lca-api-contract.md
   - docs/tidas-package-contract.md
-lastReviewedAt: 2026-04-24
-lastReviewedCommit: b71d784edd9ae151511d3712b803d06b79dfd165
+  - .githooks/pre-push
+  - scripts/docpact-gate.sh
+  - scripts/install-git-hooks.sh
+lastReviewedAt: 2026-05-08
+lastReviewedCommit: 37a158e4817ee71553c7fcec746728cd6d5b7be0
 related:
   - ../../AGENTS.md
   - ../../.docpact/config.yaml
@@ -128,3 +131,7 @@ Use this rule:
 - API behavior does not belong in the solver repo
 - local migrations here are not the workspace-wide schema source of truth
 - a merged child PR does not finish workspace delivery
+
+## Local Docpact Push Gate
+
+This repository has a versioned local `pre-push` hook under `.githooks/pre-push` that delegates to `scripts/docpact-gate.sh`. The hook is a local developer guard for docpact config validation and enforced doc-governance linting; CI remains the authoritative PR enforcement path.

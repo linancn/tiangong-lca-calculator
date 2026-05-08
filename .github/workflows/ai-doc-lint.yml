@@ -3,13 +3,9 @@ name: ai-doc-lint
 on:
   pull_request:
 
-permissions:
-  contents: read
-
 jobs:
   ai-doc-lint:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -27,4 +23,8 @@ jobs:
 
       - name: Run docpact lint
         run: >
-          docpact lint --root . --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --mode enforce
+          docpact lint
+          --root .
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+          --mode enforce

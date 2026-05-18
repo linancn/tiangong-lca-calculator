@@ -1,7 +1,7 @@
 version: 1
 layout: repo
 lastReviewedAt: "2026-05-18"
-lastReviewedCommit: "14d9a905b8a5b745b1693ba4f81af8d383db0d54"
+lastReviewedCommit: "20919db320e399b9c53f3dd3c03426e79c5b0d40"
 
 # Keep deterministic governance facts here.
 # AGENTS.md remains the repo contract entrypoint.
@@ -30,6 +30,7 @@ ownership:
           - docs/edge-function-integration.md
           - docs/frontend-integration.md
           - docs/implicit-regional-supply-mix-modeling.md
+          - docs/implicit-regional-supply-mix-modeling.en.md
           - docs/tidas-package-contract.md
           - .github/workflows/ai-doc-lint.yml
       ownerRepo: calculator
@@ -75,6 +76,7 @@ coverage:
     - docs/edge-function-integration.md
     - docs/frontend-integration.md
     - docs/implicit-regional-supply-mix-modeling.md
+    - docs/implicit-regional-supply-mix-modeling.en.md
     - docs/tidas-package-contract.md
     - Cargo.toml
     - Makefile
@@ -120,6 +122,7 @@ routing:
         - scripts/export_unmatched_no_provider_diagnostics.sh
         - docs/agents/repo-architecture.md
         - docs/implicit-regional-supply-mix-modeling.md
+        - docs/implicit-regional-supply-mix-modeling.en.md
     package-worker:
       paths:
         - crates/solver-worker/src/bin/package_worker.rs
@@ -162,6 +165,7 @@ routing:
         - docs/edge-function-integration.md
         - docs/frontend-integration.md
         - docs/implicit-regional-supply-mix-modeling.md
+        - docs/implicit-regional-supply-mix-modeling.en.md
         - docs/tidas-package-contract.md
     root-integration:
       paths:
@@ -178,6 +182,7 @@ docInventory:
     - docs/edge-function-integration.md
     - docs/frontend-integration.md
     - docs/implicit-regional-supply-mix-modeling.md
+    - docs/implicit-regional-supply-mix-modeling.en.md
     - docs/tidas-package-contract.md
 
 repo:
@@ -251,6 +256,8 @@ rules:
     triggers:
       - path: docs/implicit-regional-supply-mix-modeling.md
         kind: theory-doc
+      - path: docs/implicit-regional-supply-mix-modeling.en.md
+        kind: theory-doc
       - path: crates/solver-worker/src/bin/snapshot_builder.rs
         kind: runtime-code
       - path: crates/solver-worker/src/compiled_graph.rs
@@ -265,6 +272,8 @@ rules:
       - path: docs/agents/repo-validation.md
         mode: review_or_update
       - path: docs/implicit-regional-supply-mix-modeling.md
+        mode: review_or_update
+      - path: docs/implicit-regional-supply-mix-modeling.en.md
         mode: review_or_update
     reason: Provider allocation code and implicit regional supply mix theory must stay aligned when annual-volume weighting semantics change.
   - id: calculator-debug-and-tooling-contract

@@ -97,6 +97,14 @@ pub enum CompiledProviderGeographyTier {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CompiledProviderSupplyRegionSource {
+    ExchangeLocation,
+    ConsumerProcessLocation,
+    Unspecified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CompiledProviderFailureReason {
     NoProviderCandidates,
     RuleRequiresUniqueProvider,
@@ -123,6 +131,10 @@ pub struct CompiledProviderDecision {
     pub volume_fallback_to_one_count: i32,
     #[serde(default)]
     pub geography_tier: Option<CompiledProviderGeographyTier>,
+    #[serde(default)]
+    pub supply_region_source: Option<CompiledProviderSupplyRegionSource>,
+    #[serde(default)]
+    pub supply_region_location: Option<String>,
     pub allocations: Vec<CompiledProviderAllocation>,
 }
 

@@ -24,12 +24,13 @@ checkPaths:
   - supabase/migrations/**
   - docs/lca-api-contract.md
   - docs/implicit-regional-supply-mix-modeling.md
+  - docs/implicit-regional-supply-mix-modeling.en.md
   - docs/tidas-package-contract.md
   - .githooks/pre-push
   - scripts/docpact-gate.sh
   - scripts/install-git-hooks.sh
 lastReviewedAt: 2026-05-18
-lastReviewedCommit: 14d9a905b8a5b745b1693ba4f81af8d383db0d54
+lastReviewedCommit: 20919db320e399b9c53f3dd3c03426e79c5b0d40
 related:
   - ../../AGENTS.md
   - ../../.docpact/config.yaml
@@ -69,7 +70,7 @@ Keep these constraints in mind before editing `crates/solver-core/**` or worker 
 | `docs/lca-api-contract.md` | shared jobs/results/payload/status contract for edge and frontend consumers |
 | `docs/edge-function-integration.md` | edge-facing enqueue, polling, and service-role integration contract |
 | `docs/frontend-integration.md` | frontend-side solve/result interaction contract |
-| `docs/implicit-regional-supply-mix-modeling.md` | modeling note for implicit regional supply mix and annual-volume provider share semantics |
+| `docs/implicit-regional-supply-mix-modeling.md` / `docs/implicit-regional-supply-mix-modeling.en.md` | Chinese and English modeling notes for implicit regional supply mix, exchange-location supply-region anchors, and annual-volume provider share semantics |
 | `docs/tidas-package-contract.md` | package-worker async import/export contract |
 
 ## Current Runtime Families
@@ -92,7 +93,7 @@ These flows belong to the calculator runtime, not to the API repo.
 ### Snapshot builder and provider matching
 
 The snapshot builder path owns sparse payload generation, provider matching, and snapshot artifact metadata.
-The modeling basis for implicit regional supply mix and annual-volume provider shares lives in `docs/implicit-regional-supply-mix-modeling.md`.
+The modeling basis for implicit regional supply mix, exchange-location supply-region anchors, and annual-volume provider shares lives in `docs/implicit-regional-supply-mix-modeling.md` and `docs/implicit-regional-supply-mix-modeling.en.md`.
 
 ### Package worker
 

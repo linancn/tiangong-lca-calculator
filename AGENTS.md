@@ -23,6 +23,7 @@ checkPaths:
   - docs/edge-function-integration.md
   - docs/frontend-integration.md
   - docs/implicit-regional-supply-mix-modeling.md
+  - docs/implicit-regional-supply-mix-modeling.en.md
   - docs/tidas-package-contract.md
   - Cargo.toml
   - Makefile
@@ -35,7 +36,7 @@ checkPaths:
   - scripts/docpact-gate.sh
   - scripts/install-git-hooks.sh
 lastReviewedAt: 2026-05-18
-lastReviewedCommit: 14d9a905b8a5b745b1693ba4f81af8d383db0d54
+lastReviewedCommit: 20919db320e399b9c53f3dd3c03426e79c5b0d40
 related:
   - .docpact/config.yaml
   - docs/agents/repo-validation.md
@@ -64,7 +65,7 @@ Start here when the task may change what the compute stack does.
 | `docs/lca-api-contract.md` | shared jobs/results/payload/status contract for consumers | branch policy, proof matrix, or edge/frontend implementation details |
 | `docs/edge-function-integration.md` | edge-facing enqueue, polling, and service-role integration contract | solver internals or frontend UX rules |
 | `docs/frontend-integration.md` | frontend-facing solve/result interaction contract | edge auth implementation or solver internals |
-| `docs/implicit-regional-supply-mix-modeling.md` | modeling basis for implicit regional supply mix and annual-volume provider share semantics | implementation checklist or consumer API contract |
+| `docs/implicit-regional-supply-mix-modeling.md` / `docs/implicit-regional-supply-mix-modeling.en.md` | Chinese and English modeling basis for implicit regional supply mix, exchange-location supply-region anchors, and annual-volume provider share semantics | implementation checklist or consumer API contract |
 | `docs/tidas-package-contract.md` | package-worker async import/export contract | generic solver runtime or branch policy truth |
 
 ## Load Order
@@ -79,6 +80,7 @@ Read in this order:
    - `docs/edge-function-integration.md`
    - `docs/frontend-integration.md`
    - `docs/implicit-regional-supply-mix-modeling.md`
+   - `docs/implicit-regional-supply-mix-modeling.en.md`
    - `docs/tidas-package-contract.md`
 5. `README.md` only when you need longer setup or operator-facing context
 
@@ -119,7 +121,7 @@ At a human-readable level, this repo owns:
 - `Cargo.toml`, `Makefile`, and `crates/**` for solver topology, sparse-runtime behavior, queue workers, snapshot builder flows, and package workers
 - `scripts/**` and `tools/bw25-validator/**` for manual validation, parity, debug, snapshot, and diagnostics helpers
 - `supabase/migrations/**` for runtime SQL expectations still referenced by the calculator runtime
-- `README.md`, `docs/agents/**`, `docs/lca-api-contract.md`, `docs/edge-function-integration.md`, `docs/frontend-integration.md`, `docs/implicit-regional-supply-mix-modeling.md`, `docs/tidas-package-contract.md`, and repo-local governed docs
+- `README.md`, `docs/agents/**`, `docs/lca-api-contract.md`, `docs/edge-function-integration.md`, `docs/frontend-integration.md`, `docs/implicit-regional-supply-mix-modeling.md`, `docs/implicit-regional-supply-mix-modeling.en.md`, `docs/tidas-package-contract.md`, and repo-local governed docs
 
 This repo does not own:
 
@@ -159,7 +161,7 @@ Route those tasks to:
 - if shared jobs/results/payload/status semantics change, update `docs/lca-api-contract.md`
 - if edge-facing enqueue, polling, or service-role integration guidance changes, update `docs/edge-function-integration.md`
 - if frontend-facing solve/result interaction guidance changes, update `docs/frontend-integration.md`
-- if implicit regional supply mix theory or annual-volume provider share semantics change, update `docs/implicit-regional-supply-mix-modeling.md`
+- if implicit regional supply mix theory, exchange-location supply-region semantics, or annual-volume provider share semantics change, update both `docs/implicit-regional-supply-mix-modeling.md` and `docs/implicit-regional-supply-mix-modeling.en.md`
 - if package-worker import/export contract changes, update `docs/tidas-package-contract.md`
 - if landing context or operator setup changes, update `README.md`
 - do not copy the same rule into multiple docs just to make it easier to find

@@ -74,6 +74,8 @@ pub struct SnapshotProviderDecisionDiagnostics {
     pub volume_fallback_to_one_count: i64,
     #[serde(default)]
     pub geography_tier_counts: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub supply_region_source_counts: BTreeMap<String, i64>,
 }
 
 /// Matching coverage diagnostics.
@@ -356,6 +358,7 @@ mod tests {
                     )]),
                     volume_fallback_to_one_count: 0,
                     geography_tier_counts: BTreeMap::new(),
+                    supply_region_source_counts: BTreeMap::new(),
                 },
             },
             reference: SnapshotReferenceCoverage {

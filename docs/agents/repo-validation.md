@@ -27,13 +27,14 @@ checkPaths:
   - docs/edge-function-integration.md
   - docs/frontend-integration.md
   - docs/implicit-regional-supply-mix-modeling.md
+  - docs/implicit-regional-supply-mix-modeling.en.md
   - docs/tidas-package-contract.md
   - .github/workflows/**
   - .githooks/pre-push
   - scripts/docpact-gate.sh
   - scripts/install-git-hooks.sh
 lastReviewedAt: 2026-05-18
-lastReviewedCommit: 14d9a905b8a5b745b1693ba4f81af8d383db0d54
+lastReviewedCommit: 20919db320e399b9c53f3dd3c03426e79c5b0d40
 related:
   - ../../AGENTS.md
   - ../../.docpact/config.yaml

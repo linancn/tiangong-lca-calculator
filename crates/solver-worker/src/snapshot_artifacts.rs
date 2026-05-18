@@ -70,6 +70,12 @@ pub struct SnapshotProviderDecisionDiagnostics {
     pub resolved_strategy_counts: BTreeMap<String, i64>,
     #[serde(default)]
     pub unresolved_reason_counts: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub volume_fallback_to_one_count: i64,
+    #[serde(default)]
+    pub geography_tier_counts: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub supply_region_source_counts: BTreeMap<String, i64>,
 }
 
 /// Matching coverage diagnostics.
@@ -350,6 +356,9 @@ mod tests {
                         "rule_requires_unique_provider".to_owned(),
                         1,
                     )]),
+                    volume_fallback_to_one_count: 0,
+                    geography_tier_counts: BTreeMap::new(),
+                    supply_region_source_counts: BTreeMap::new(),
                 },
             },
             reference: SnapshotReferenceCoverage {

@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(config.build_snapshot_max_concurrency(), 1);
         assert_eq!(
             config.build_snapshot_lock_poll_interval(),
-            Duration::from_millis(5_000)
+            Duration::from_secs(5)
         );
     }
 

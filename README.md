@@ -20,8 +20,8 @@ checkPaths:
   - docs/edge-function-integration.md
   - docs/frontend-integration.md
   - docs/tidas-package-contract.md
-lastReviewedAt: 2026-04-23
-lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
+lastReviewedAt: 2026-05-19
+lastReviewedCommit: a5cf624ebe294e40cb3d11377678b6020a362631
 related:
   - AGENTS.md
   - .docpact/config.yaml

@@ -13,11 +13,14 @@ whenToUse:
 whenToUpdate:
   - 当 crates/solver-worker/src/review_submit_gate.rs 的 report schema、policy 或 blocker code 变化时
   - 当 crates/solver-worker/src/bin/review_submit_gate.rs 的 CLI contract 变化时
+  - 当 crates/solver-worker/src/bin/review_submit_gate_runner.rs 的 DB runner contract 变化时
   - 当提交审核前的 calculator-owned gate 与 matrix-readiness 的边界变化时
 checkPaths:
   - docs/review-submit-fast-gate-contract.md
   - crates/solver-worker/src/review_submit_gate.rs
   - crates/solver-worker/src/bin/review_submit_gate.rs
+  - crates/solver-worker/src/review_submit_gate_runner.rs
+  - crates/solver-worker/src/bin/review_submit_gate_runner.rs
   - crates/solver-worker/src/readiness.rs
   - crates/solver-worker/src/compiled_graph.rs
   - docs/lca-api-contract.md
@@ -41,7 +44,12 @@ related:
 
 ## 调用入口
 
-当前 calculator 暴露 CLI 与 library function：
+calculator 暴露两个入口：
+
+- `review_submit_gate`：纯文件输入/输出 CLI，适合 fixture、CI、Foundry 或手工诊断。
+- `review_submit_gate_runner`：数据库运行时 runner，负责领取持久化 gate run、构造 snapshot、执行 calculator gate，并把结果写回数据库 RPC。
+
+纯文件 CLI：
 
 ```bash
 cargo run -p solver-worker --bin review_submit_gate -- \
@@ -50,6 +58,20 @@ cargo run -p solver-worker --bin review_submit_gate -- \
 ```
 
 CLI 默认总是写出 report。调用方需要命令行级失败时，可以传 `--fail-on-blocked`，blocked report 会以 exit code `2` 返回。
+
+DB runner：
+
+```bash
+cargo run -p solver-worker --bin review_submit_gate_runner -- --once
+```
+
+runner 读取 `DATABASE_URL` / `CONN` 与 S3 artifact 环境变量，直接访问 `public.dataset_review_submit_gate_runs`。它只领取：
+
+- `policy_profile = review_submit_fast.v1`
+- `report_schema_version = review_submit_gate_report.v1`
+- `status = queued`，以及超过 `REVIEW_SUBMIT_GATE_STALE_RUNNING_SECONDS` 的 stale `running` 记录
+
+领取后状态变为 `running`。执行完成后，runner 调用 `public.cmd_dataset_review_submit_gate_record_result` 写入 `passed`、`blocked` 或 `error`。`--once` 用于一次性处理一条或空转退出；常驻模式会按 `REVIEW_SUBMIT_GATE_POLL_MS` 轮询。
 
 ## 输入
 
@@ -66,6 +88,10 @@ CLI 默认总是写出 report。调用方需要命令行级失败时，可以传
 
 `process_records` 是提交审核快速 gate 的可选增强输入。没有它时，gate 仍可根据 `coverage`、`payload` 与 `compiled_graph` 执行 provider、sparse structure 和 probe 检查，但无法发现所有 JSON/process-level 历史事故模式。
 
+DB runner 当前支持 `dataset_table = processes`。它使用 gate run 的 `dataset_id + dataset_version` 作为 request root，使用 `requested_by` 作为 snapshot builder 的 `include_user_id`，并以 gate run ID 作为请求 snapshot ID。runner 从 `processes.json_ordered` 计算稳定 SHA-256，与 gate run 的 `revision_checksum` 对比；不匹配会形成 `revision_report_stale` blocker。
+
+当前 snapshot artifact 持久化 `coverage + payload + config`，不持久化 `compiled_graph`。因此 DB runner 的 report 会消费 artifact 中的 coverage/payload，并补充单个提交 process 的 `process_records`；compiled-graph 级 flow semantic examples 仍由文件 CLI / library input 保留为增强能力。
+
 ## 输出
 
 输出 schema version 为 `review_submit_gate_report.v1`，核心字段为：
@@ -80,6 +106,12 @@ CLI 默认总是写出 report。调用方需要命令行级失败时，可以传
 - `blockers`: stable blocker code、message 和 detail payload。
 
 调用方必须以 `status` 和 `blockers[].code` 为准。`metrics` 用于展示、诊断和后续数据修复，不应被外部调用方重新解释成另一套 gate 规则。
+
+DB runner 写回数据库时：
+
+- `passed`：`blockingReasons = []`，`calculatorReport` 为 `review_submit_gate_report.v1`。
+- `blocked`：`blockingReasons` 由 `report.blockers` 直接映射，`calculatorReport` 为完整 report。
+- `error`：表示 runner、snapshot builder、artifact、DB 可见性或暂不支持的数据集类型导致 calculator 没有产出 passed/blocked 结论；`blockingReasons` 至少包含一个 runtime blocker，`calculatorReport.status = error`。
 
 ## Policy 默认值
 

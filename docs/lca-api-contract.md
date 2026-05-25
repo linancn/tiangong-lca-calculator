@@ -230,13 +230,21 @@ Foundry、CLI 或 Edge adapter 只能消费该 report 的 `status`、`next_actio
 
 dataset revision 提交审核前使用 calculator 侧 `review_submit_gate` 判断当前 revision 是否可进入审核流程。该 gate 输出二元结果：`passed` 或 `blocked`，不产生 `manual_review_required` 状态。
 
-可调用入口：
+文件输入/输出入口：
 
 ```bash
 cargo run -p solver-worker --bin review_submit_gate -- \
   --input review-submit-gate-input.json \
   --out review-submit-gate-report.json
 ```
+
+数据库运行时入口：
+
+```bash
+cargo run -p solver-worker --bin review_submit_gate_runner -- --once
+```
+
+Edge/API 不直接运行数值 gate。Edge 通过数据库 RPC 创建、读取或 rerun `dataset_review_submit_gate_runs`；calculator runner 领取 queued gate run，构造 request-root snapshot，执行 `review_submit_gate`，再通过 `cmd_dataset_review_submit_gate_record_result` 写回 `passed`、`blocked` 或 `error`。
 
 输入 `review_submit_gate_input.v1` 复用 snapshot coverage、`ModelSparseData` sparse payload、compiled provider graph，并可附加 dataset revision checksum、target process indices 和 process/exchange scan records。输出 `review_submit_gate_report.v1` 包含：
 
@@ -247,7 +255,7 @@ cargo run -p solver-worker --bin review_submit_gate -- \
 
 该 gate 先执行 revision/process/provider/flow/sparse 结构检查；只有没有结构 blocker 时才执行 sparse factorization readiness 与 targeted RHS solve。它不 materialize inverse，也不要求 full `solve_all_unit`。
 
-稳定 blocker code、policy 默认值、快速验证顺序和 caller consumption 约束由 `docs/review-submit-fast-gate-contract.md` 维护。Edge 或 Next 在提交审核链路中应消费该 report 或由服务端封装后的等价 gate result，不应直接把 `matrix_readiness_report.v1` 的 blocker 当成提交审核结论。
+稳定 blocker code、policy 默认值、快速验证顺序和 caller consumption 约束由 `docs/review-submit-fast-gate-contract.md` 维护。Edge 或 Next 在提交审核链路中应消费 DB gate result 里的 status、blockingReasons 和 calculatorReport，不应直接把 `matrix_readiness_report.v1` 的 blocker 当成提交审核结论。
 
 ## 6. 幂等与请求缓存（建议约束）
 

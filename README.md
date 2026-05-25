@@ -17,6 +17,7 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - docs/lca-api-contract.md
+  - docs/review-submit-fast-gate-contract.md
   - docs/edge-function-integration.md
   - docs/frontend-integration.md
   - docs/tidas-package-contract.md
@@ -47,6 +48,7 @@ related:
 4. `docs/agents/repo-architecture.md`
 5. 再按任务加载对应窄契约：
    - `docs/lca-api-contract.md`
+   - `docs/review-submit-fast-gate-contract.md`
    - `docs/edge-function-integration.md`
    - `docs/frontend-integration.md`
    - `docs/tidas-package-contract.md`
@@ -92,6 +94,9 @@ related:
 - 已支持 snapshot artifact-first：
   - builder 直接生成 `M/B/C` 并上传 `HDF5`
   - worker 优先从 `lca_snapshot_artifacts` 下载 artifact，失败才回退到旧 `lca_*_entries` 读取
+- 已支持 review-submit gate：
+  - `review_submit_gate` 可对文件输入产出 `review_submit_gate_report.v1`
+  - `review_submit_gate_runner` 可领取数据库中的 submit-review gate run，并写回 `passed` / `blocked` / `error`
 
 ## 3. 结果文件格式（已选定）
 
@@ -297,6 +302,9 @@ psql "$CONN" -v ON_ERROR_STOP=1 -f supabase/migrations/20260309042000_lca_latest
 - `BUILD_SNAPSHOT_LOCK_POLL_MS`（等待 `build_snapshot` 并发槽位时的轮询间隔，默认 `5000`）
 - `SNAPSHOT_BUILDER_DB_MAX_CONNECTIONS`（`snapshot_builder` 子进程连接池上限，默认 `4`）
 - `SNAPSHOT_BUILDER_DB_ACQUIRE_TIMEOUT_SECONDS`（`snapshot_builder` 获取连接超时，默认 `30`）
+- `REVIEW_SUBMIT_GATE_POLL_MS`（review-submit gate runner 轮询间隔，默认 `1000`）
+- `REVIEW_SUBMIT_GATE_MAX_RUNS`（可选；设置后 runner 处理指定条数后退出）
+- `REVIEW_SUBMIT_GATE_STALE_RUNNING_SECONDS`（runner 重新领取 stale `running` gate run 的阈值，默认 `21600`）
 
 Supabase 连接说明：
 
@@ -441,10 +449,18 @@ set -a && source .env && set +a
 cargo run -p solver-worker --bin package_worker --release -- --pgmq-queue lca_package_jobs --worker-vt-seconds 600 --worker-poll-ms 300
 ```
 
+启动 review-submit gate runner：
+
+```bash
+set -a && source .env && set +a
+cargo run -p solver-worker --bin review_submit_gate_runner --release --
+```
+
 说明：
 
 - `solver-worker` 消费 `lca_jobs`，处理 `prepare_factorization` / `solve_one` / `solve_all_unit` 等计算任务。
 - `package_worker` 消费 `lca_package_jobs`，处理前端 TIDAS package 导出/导入异步任务。
+- `review_submit_gate_runner` 消费数据库表 `dataset_review_submit_gate_runs` 中的 gate run，执行 request-root snapshot + calculator gate，并通过数据库 RPC 写回结果。
 
 ### 6.2 计算正确性基线流程（Expected 对比）
 

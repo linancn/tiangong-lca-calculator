@@ -132,7 +132,9 @@ routing:
     review-submit-gate:
       paths:
         - crates/solver-worker/src/review_submit_gate.rs
+        - crates/solver-worker/src/review_submit_gate_runner.rs
         - crates/solver-worker/src/bin/review_submit_gate.rs
+        - crates/solver-worker/src/bin/review_submit_gate_runner.rs
         - crates/solver-worker/src/readiness.rs
         - crates/solver-worker/src/compiled_graph.rs
         - docs/review-submit-fast-gate-contract.md
@@ -386,7 +388,11 @@ rules:
         kind: runtime-contract
       - path: crates/solver-worker/src/review_submit_gate.rs
         kind: runtime-code
+      - path: crates/solver-worker/src/review_submit_gate_runner.rs
+        kind: runtime-code
       - path: crates/solver-worker/src/bin/review_submit_gate.rs
+        kind: runtime-code
+      - path: crates/solver-worker/src/bin/review_submit_gate_runner.rs
         kind: runtime-code
       - path: crates/solver-worker/src/readiness.rs
         kind: runtime-code

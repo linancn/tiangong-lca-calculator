@@ -26,6 +26,7 @@ pub mod pgbouncer_sqlx;
 pub mod queue;
 pub mod readiness;
 pub mod review_submit_gate;
+pub mod review_submit_gate_runner;
 pub mod snapshot_artifacts;
 pub mod snapshot_index;
 pub mod storage;

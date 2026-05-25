@@ -24,7 +24,7 @@ use crate::{
     },
     config::AppConfig,
     contribution_path::{ContributionPathArtifact, analyze_contribution_path},
-    snapshot_artifacts::decode_snapshot_artifact,
+    snapshot_artifacts::{DecodedSnapshotArtifact, decode_snapshot_artifact},
     snapshot_index::{SnapshotIndexDocument, derive_snapshot_index_url},
     storage::ObjectStoreClient,
     types::{JobPayload, SolveOptionsPayload},
@@ -666,6 +666,18 @@ async fn fetch_snapshot_payload_from_artifact(
     snapshot_id: Uuid,
     meta: &SnapshotArtifactMeta,
 ) -> anyhow::Result<ModelSparseData> {
+    Ok(
+        fetch_decoded_snapshot_artifact_from_meta(state, snapshot_id, meta)
+            .await?
+            .payload,
+    )
+}
+
+async fn fetch_decoded_snapshot_artifact_from_meta(
+    state: &AppState,
+    snapshot_id: Uuid,
+    meta: &SnapshotArtifactMeta,
+) -> anyhow::Result<DecodedSnapshotArtifact> {
     let bytes = state
         .object_store
         .download_object_url(&meta.artifact_url)
@@ -680,10 +692,20 @@ async fn fetch_snapshot_payload_from_artifact(
         ));
     }
 
-    Ok(decoded.payload)
+    Ok(decoded)
 }
 
-async fn fetch_snapshot_index_document(
+pub(crate) async fn fetch_decoded_snapshot_artifact(
+    state: &AppState,
+    snapshot_id: Uuid,
+) -> anyhow::Result<DecodedSnapshotArtifact> {
+    let meta = fetch_snapshot_artifact_meta(&state.pool, snapshot_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("snapshot {snapshot_id} has no ready artifact"))?;
+    fetch_decoded_snapshot_artifact_from_meta(state, snapshot_id, &meta).await
+}
+
+pub(crate) async fn fetch_snapshot_index_document(
     state: &AppState,
     snapshot_id: Uuid,
 ) -> anyhow::Result<SnapshotIndexDocument> {
@@ -1431,15 +1453,15 @@ struct QueryArtifactMeta {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-struct SnapshotBuilderExecution {
-    requested_snapshot_id: Uuid,
-    resolved_snapshot_id: Uuid,
+pub(crate) struct SnapshotBuilderExecution {
+    pub(crate) requested_snapshot_id: Uuid,
+    pub(crate) resolved_snapshot_id: Uuid,
     #[serde(skip_serializing)]
-    build_timing_sec: Option<Value>,
-    command: Vec<String>,
-    exit_code: i32,
-    stdout_tail: String,
-    stderr_tail: String,
+    pub(crate) build_timing_sec: Option<Value>,
+    pub(crate) command: Vec<String>,
+    pub(crate) exit_code: i32,
+    pub(crate) stdout_tail: String,
+    pub(crate) stderr_tail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1454,6 +1476,57 @@ struct PersistTimingContext {
     compute_timing: Option<Value>,
     encode_artifact_sec: f64,
     upload_artifact_sec: f64,
+}
+
+pub(crate) async fn run_review_submit_gate_snapshot_builder(
+    state: &AppState,
+    snapshot_id: Uuid,
+    include_user_id: Uuid,
+    request_roots: &[crate::graph_types::RequestRootProcess],
+) -> anyhow::Result<SnapshotBuilderExecution> {
+    let lock_guard = acquire_build_snapshot_lock(
+        &state.pool,
+        state.build_snapshot_max_concurrency,
+        state.build_snapshot_lock_poll_interval,
+    )
+    .await?;
+    let executed_result = run_snapshot_builder_job(
+        snapshot_id,
+        None,
+        Some(include_user_id),
+        Some(request_roots),
+        Some("split_by_process_volume"),
+        Some("lenient"),
+        Some("lenient"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    )
+    .await;
+    let release_result = lock_guard.release().await;
+
+    match executed_result {
+        Ok(executed) => {
+            if let Err(err) = release_result {
+                return Err(anyhow::anyhow!(
+                    "failed to release build_snapshot advisory lock: {err}"
+                ));
+            }
+            Ok(executed)
+        }
+        Err(err) => {
+            if let Err(release_err) = release_result {
+                warn!(
+                    error = %release_err,
+                    "failed to release build_snapshot advisory lock after review-submit snapshot builder failure"
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 async fn persist_result_artifact(

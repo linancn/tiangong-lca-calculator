@@ -69,7 +69,7 @@ Start here when the task may change what the compute stack does.
 | `README.md` | repo landing context, operator setup, and runtime overview | machine-readable routing or lint semantics |
 | `docs/lca-api-contract.md` | shared jobs/results/payload/status contract for consumers | branch policy, proof matrix, or edge/frontend implementation details |
 | `docs/matrix-readiness-report-contract.md` | calculator-owned matrix-readiness CLI and report artifact schema, blocker/finding codes, next_action semantics, and policy surface | HTTP endpoint contract or edge request/auth behavior |
-| `docs/review-submit-fast-gate-contract.md` | calculator-owned review-submit fast gate schema, passed/blocked semantics, blocker codes, policy defaults, and targeted probe contract | Edge HTTP API, persistence schema, or Next submit-review UX |
+| `docs/review-submit-fast-gate-contract.md` | calculator-owned review-submit fast gate schema, passed/blocked semantics, blocker codes, policy defaults, targeted probe contract, and DB runner result-recorder behavior | Edge HTTP API, persistence schema, or Next submit-review UX |
 | `docs/edge-function-integration.md` | edge-facing enqueue, polling, and service-role integration contract | solver internals or frontend UX rules |
 | `docs/frontend-integration.md` | frontend-facing solve/result interaction contract | edge auth implementation or solver internals |
 | `docs/implicit-regional-supply-mix-modeling.md` / `docs/implicit-regional-supply-mix-modeling.en.md` | Chinese and English modeling basis for implicit regional supply mix, exchange-location supply-region anchors, and annual-volume provider share semantics | implementation checklist or consumer API contract |
@@ -169,7 +169,7 @@ Route those tasks to:
 - if repo shape, hotspot families, or path ownership explanation changes, update `docs/agents/repo-architecture.md`
 - if shared jobs/results/payload/status semantics change, update `docs/lca-api-contract.md`
 - if matrix-readiness report schema, blocker/finding codes, policy defaults, or next_action semantics change, update `docs/matrix-readiness-report-contract.md`
-- if review-submit fast gate schema, blocker codes, policy defaults, or targeted probe semantics change, update `docs/review-submit-fast-gate-contract.md`
+- if review-submit fast gate schema, blocker codes, policy defaults, targeted probe semantics, or DB runner result-recorder behavior changes, update `docs/review-submit-fast-gate-contract.md`
 - if edge-facing enqueue, polling, or service-role integration guidance changes, update `docs/edge-function-integration.md`
 - if frontend-facing solve/result interaction guidance changes, update `docs/frontend-integration.md`
 - if implicit regional supply mix theory, exchange-location supply-region semantics, or annual-volume provider share semantics change, update both `docs/implicit-regional-supply-mix-modeling.md` and `docs/implicit-regional-supply-mix-modeling.en.md`

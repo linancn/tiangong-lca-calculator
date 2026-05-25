@@ -9,13 +9,18 @@ language: zh-CN
 whenToUse:
   - 当你需要把 edge-functions 请求稳定映射到 calculator 异步求解链路时
   - 当 enqueue、polling、service-role、request_key 或 snapshot 选择规则变化时
+  - 当 Edge 需要接入 dataset review-submit gate 的 enqueue/read/rerun/status contract 时
 whenToUpdate:
   - 当 edge-facing solve API、入队流程、worker 边界或错误处理约定变化时
+  - 当 review-submit gate 的 Edge RPC 边界或 calculator runner 结果回写边界变化时
 checkPaths:
   - docs/edge-function-integration.md
   - AGENTS.md
   - .docpact/config.yaml
   - docs/lca-api-contract.md
+  - docs/review-submit-fast-gate-contract.md
+  - crates/solver-worker/src/review_submit_gate_runner.rs
+  - crates/solver-worker/src/bin/review_submit_gate_runner.rs
   - crates/**
   - supabase/migrations/**
 lastReviewedAt: 2026-04-23
@@ -185,3 +190,23 @@ worker：
 - 不要让前端直接调用 `pgmq.send`。
 - 不要在 Edge Function 同步等待完整求解结果。
 - 不要在 Edge Function 中进行重数值计算。
+
+## 9. Review Submit Gate 集成边界
+
+提交审核前的数值稳定性 gate 分成三层：
+
+- Edge 负责鉴权、请求校验、调用数据库 RPC `cmd_dataset_review_submit_gate` 创建 / 读取 / rerun gate run，并把返回状态透出给 Next。
+- Database 负责 `dataset_review_submit_gate_runs`、`cmd_dataset_review_submit_gate_record_result`、`cmd_dataset_assert_review_submit_gate_passed` 等持久化和发布前断言。
+- calculator `review_submit_gate_runner` 负责领取 queued gate run、构造 request-root snapshot、执行 `review_submit_gate`，并通过 `cmd_dataset_review_submit_gate_record_result` 写入 `passed`、`blocked` 或 `error`。
+
+Edge 不应执行 snapshot builder、provider scan、sparse factorization probe 或 targeted RHS solve。Edge 也不应直接更新 `dataset_review_submit_gate_runs.calculator_report`；结果写入只能由 calculator runner 使用 service-role DB 连接完成。
+
+状态语义：
+
+- `queued` / `running`：Edge 返回待处理，Next 继续轮询。
+- `passed`：提交审核可继续调用发布 / 审核流的后续 RPC。
+- `blocked`：数据修复问题，Next 应展示 `blockingReasons` 和 `calculatorReport.blockers`。
+- `error`：runner、artifact、DB 可见性或部署问题，Next 应提示稍后重试或联系运维。
+- `stale`：旧 gate run 被新的 ensure/rerun 替代，Edge/Next 应读取最新 gate run。
+
+部署上，`review_submit_gate_runner` 需要与 solver worker 相同的 DB 和 S3 artifact 环境变量。常驻运行时使用 `REVIEW_SUBMIT_GATE_POLL_MS` 轮询；运维和 CI smoke 可使用 `--once` 处理一条后退出。

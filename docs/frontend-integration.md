@@ -9,14 +9,17 @@ language: zh-CN
 whenToUse:
   - 当你需要给前端消费方说明 solve/result 交互契约时
   - 当 job 状态展示、轮询策略、artifact 读取或幂等键策略变化时
+  - 当提交审核前 review-submit gate 的前端状态消费规则变化时
 whenToUpdate:
   - 当前端侧交互流程、结果读取方式或错误处理约定变化时
+  - 当 review-submit gate 的前端轮询、状态展示或 blocker 展示规则变化时
 checkPaths:
   - docs/frontend-integration.md
   - AGENTS.md
   - .docpact/config.yaml
   - docs/lca-api-contract.md
   - docs/edge-function-integration.md
+  - docs/review-submit-fast-gate-contract.md
 lastReviewedAt: 2026-04-23
 lastReviewedCommit: 4e04ac3c840390998ce4280a03c8a75829ba198a
 related:
@@ -118,10 +121,23 @@ export type JobStatus =
   | 'stale';
 ```
 
-## 9. 前端验收清单
+## 9. Review Submit Gate 状态消费
+
+提交审核前的数值稳定性 gate 不由前端执行。前端只调用 Edge 提供的 submit-review gate 接口，并消费数据库 gate result：
+
+- `queued` / `running`：继续轮询，展示待验证或验证中。
+- `passed`：允许继续提交审核。
+- `blocked`：展示 `blockingReasons` 和 `calculatorReport.blockers`，引导用户修复数据后 rerun。
+- `error`：展示系统错误态，允许稍后重试或联系运维。
+- `stale`：旧 gate run 已被替代，应重新读取最新 gate run。
+
+前端不要复制 calculator 的 provider、sparse factorization、targeted RHS solve 或 blocker 判定逻辑。
+
+## 10. 前端验收清单
 
 - 同一请求重复提交不会生成重复 job。
 - 页面刷新后可恢复轮询状态。
 - `failed` 能显示可读错误并支持重试。
 - 结果读取按 artifact 元数据路径工作（不依赖 inline payload）。
 - 用户无法读取他人的 job/result。
+- review-submit gate 的 `blocked` 能显示 blocker code/message/details，`error` 与数据 blocker 文案分开。

@@ -1018,6 +1018,7 @@ mod tests {
                         model_id: None,
                         location: Some("CN".to_owned()),
                         reference_year: Some(2024),
+                        annual_supply_or_production_volume: None,
                         partition: ScopeProcessPartition::Public,
                     },
                     CompiledProcess {
@@ -1028,6 +1029,7 @@ mod tests {
                         model_id: None,
                         location: Some("CN".to_owned()),
                         reference_year: Some(2024),
+                        annual_supply_or_production_volume: None,
                         partition: ScopeProcessPartition::Private,
                     },
                 ],
@@ -1036,6 +1038,7 @@ mod tests {
                     flow_id,
                     kind: CompiledFlowKind::Product,
                 }],
+                provider_outputs: Vec::new(),
                 provider_decisions: vec![provider_decision(provider_id, flow_id, provider_closed)],
                 technosphere_edges: Vec::new(),
                 biosphere_edges: Vec::new(),

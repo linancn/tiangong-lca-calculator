@@ -244,7 +244,7 @@ cargo run -p solver-worker --bin review_submit_gate -- \
 cargo run -p solver-worker --bin review_submit_gate_runner -- --once
 ```
 
-Edge/API 不直接运行数值 gate。Edge 通过数据库 RPC 创建、读取或 rerun `dataset_review_submit_gate_runs`；calculator runner 领取 queued gate run，默认构造 no-LCIA request-root snapshot，执行 `review_submit_gate`，再通过 `cmd_dataset_review_submit_gate_record_result` 写回 `passed`、`blocked` 或 `error`。
+Edge/API 不直接运行数值 gate。Edge 通过数据库 RPC 创建、读取或 rerun `dataset_review_submit_gate_runs`；calculator runner 领取 queued gate run，默认构造 no-LCIA review-submit baseline + draft overlay snapshot，执行 `review_submit_gate`，再通过 `cmd_dataset_review_submit_gate_record_result` 写回 `passed`、`blocked` 或 `error`。
 
 输入 `review_submit_gate_input.v1` 复用 snapshot coverage、`ModelSparseData` sparse payload、compiled provider graph，并可附加 dataset revision checksum、target process indices 和 process/exchange scan records。输出 `review_submit_gate_report.v1` 包含：
 

@@ -236,6 +236,7 @@ async fn execute_claimed_gate_run(
         run.id,
         run.requested_by,
         request_roots.as_slice(),
+        &actual_revision_checksum,
     )
     .await
     .context("failed to build review-submit gate snapshot")?;

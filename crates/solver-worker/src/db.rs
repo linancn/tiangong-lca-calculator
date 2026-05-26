@@ -1203,6 +1203,7 @@ pub async fn handle_job_payload(state: &AppState, payload: JobPayload) -> anyhow
                 None,
                 None,
                 None,
+                None,
                 no_lcia.unwrap_or(false),
             )
             .await;
@@ -1488,6 +1489,7 @@ pub(crate) async fn run_review_submit_gate_snapshot_builder(
     snapshot_id: Uuid,
     include_user_id: Uuid,
     request_roots: &[crate::graph_types::RequestRootProcess],
+    revision_checksum: &str,
 ) -> anyhow::Result<SnapshotBuilderExecution> {
     let lock_guard = acquire_build_snapshot_lock(
         &state.pool,
@@ -1511,6 +1513,7 @@ pub(crate) async fn run_review_submit_gate_snapshot_builder(
         Some(REVIEW_SUBMIT_SNAPSHOT_ARTIFACT_PURPOSE),
         Some(REVIEW_SUBMIT_SNAPSHOT_TTL_SECONDS),
         Some(REVIEW_SUBMIT_SNAPSHOT_TTL_SECONDS),
+        Some(revision_checksum),
         true,
     )
     .await;
@@ -1603,6 +1606,7 @@ async fn run_snapshot_builder_job(
     artifact_purpose: Option<&str>,
     artifact_expires_in_seconds: Option<i64>,
     reuse_max_age_seconds: Option<i64>,
+    review_submit_revision_checksum: Option<&str>,
     no_lcia: bool,
 ) -> anyhow::Result<SnapshotBuilderExecution> {
     let mut builder_args = vec![
@@ -1670,6 +1674,13 @@ async fn run_snapshot_builder_job(
     if let Some(max_age_seconds) = reuse_max_age_seconds.filter(|seconds| *seconds > 0) {
         builder_args.push("--reuse-max-age-seconds".to_owned());
         builder_args.push(max_age_seconds.to_string());
+    }
+    if let Some(checksum) = review_submit_revision_checksum
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder_args.push("--review-submit-revision-checksum".to_owned());
+        builder_args.push(checksum.to_owned());
     }
 
     let candidates = snapshot_builder_candidates(builder_args);

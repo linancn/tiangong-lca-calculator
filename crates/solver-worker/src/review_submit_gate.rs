@@ -1441,6 +1441,7 @@ mod tests {
                         kind: CompiledFlowKind::Elementary,
                     },
                 ],
+                provider_outputs: Vec::new(),
                 provider_decisions: vec![CompiledProviderDecision {
                     consumer_idx: 1,
                     flow_id: product_flow_id,
@@ -1572,6 +1573,7 @@ mod tests {
             model_id: None,
             location: Some("CN".to_owned()),
             reference_year: Some(2024),
+            annual_supply_or_production_volume: None,
             partition: ScopeProcessPartition::Private,
         }
     }

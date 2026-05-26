@@ -8,6 +8,7 @@ use solver_core::ModelSparseData;
 use tempfile::Builder;
 use uuid::Uuid;
 
+use crate::compiled_graph::CompiledGraph;
 use crate::graph_types::{RequestRootProcess, SnapshotSelectionMode};
 
 const SCHEMA_VERSION: u8 = 1;
@@ -62,6 +63,12 @@ pub struct SnapshotBuildConfig {
     /// Optional lifecycle / caller purpose for source-hash isolation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_purpose: Option<String>,
+    /// Optional dependency surface fingerprint for review-submit baseline reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_dependency_fingerprint: Option<String>,
+    /// Optional authoritative root revision checksum for review-submit overlay reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_revision_checksum: Option<String>,
     /// Optional LCIA method id.
     pub method_id: Option<Uuid>,
     /// Optional LCIA method version.
@@ -270,7 +277,7 @@ fn default_biosphere_sign_mode() -> String {
     "signed".to_owned()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SnapshotArtifactEnvelope {
     version: u8,
     format: String,
@@ -278,6 +285,8 @@ struct SnapshotArtifactEnvelope {
     config: SnapshotBuildConfig,
     coverage: SnapshotCoverageReport,
     payload: ModelSparseData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compiled_graph: Option<CompiledGraph>,
 }
 
 /// Encoded snapshot artifact bytes and metadata.
@@ -298,6 +307,7 @@ pub struct DecodedSnapshotArtifact {
     pub config: SnapshotBuildConfig,
     pub coverage: SnapshotCoverageReport,
     pub payload: ModelSparseData,
+    pub compiled_graph: Option<CompiledGraph>,
 }
 
 /// Encodes one snapshot matrix payload into `HDF5`.
@@ -307,6 +317,17 @@ pub fn encode_snapshot_artifact(
     coverage: SnapshotCoverageReport,
     payload: &ModelSparseData,
 ) -> anyhow::Result<EncodedSnapshotArtifact> {
+    encode_snapshot_artifact_with_graph(snapshot_id, config, coverage, payload, None)
+}
+
+/// Encodes one snapshot matrix payload plus optional compiled graph metadata into `HDF5`.
+pub fn encode_snapshot_artifact_with_graph(
+    snapshot_id: Uuid,
+    config: SnapshotBuildConfig,
+    coverage: SnapshotCoverageReport,
+    payload: &ModelSparseData,
+    compiled_graph: Option<CompiledGraph>,
+) -> anyhow::Result<EncodedSnapshotArtifact> {
     let envelope = SnapshotArtifactEnvelope {
         version: SCHEMA_VERSION,
         format: SNAPSHOT_ARTIFACT_FORMAT.to_owned(),
@@ -314,6 +335,7 @@ pub fn encode_snapshot_artifact(
         config,
         coverage,
         payload: payload.clone(),
+        compiled_graph,
     };
 
     let json = serde_json::to_vec(&envelope)?;
@@ -376,6 +398,7 @@ pub fn decode_snapshot_artifact(bytes: &[u8]) -> anyhow::Result<DecodedSnapshotA
         config: envelope.config,
         coverage: envelope.coverage,
         payload: envelope.payload,
+        compiled_graph: envelope.compiled_graph,
     })
 }
 
@@ -411,6 +434,10 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::Builder;
 
+    use crate::compiled_graph::{
+        CompiledAllocationStats, CompiledGraph, CompiledMatchingStats, CompiledReferenceStats,
+    };
+
     use super::{
         DATASET_ENVELOPE_JSON, HDF5_DEFLATE_LEVEL, SNAPSHOT_ARTIFACT_FORMAT,
         SNAPSHOT_COVERAGE_SCHEMA_VERSION, SnapshotAllocationCoverage, SnapshotBuildConfig,
@@ -418,7 +445,7 @@ mod tests {
         SnapshotGeographySummary, SnapshotMatchingCoverage, SnapshotMatrixScale,
         SnapshotProviderDecisionDiagnostics, SnapshotReferenceCoverage, SnapshotResolutionSummary,
         SnapshotSelectionMode, SnapshotSingularRisk, SnapshotVolumeWeightSummary,
-        decode_snapshot_artifact, encode_snapshot_artifact,
+        decode_snapshot_artifact, encode_snapshot_artifact, encode_snapshot_artifact_with_graph,
     };
 
     #[test]
@@ -439,6 +466,8 @@ mod tests {
             singular_eps: 1e-12,
             has_lcia: true,
             artifact_purpose: None,
+            root_dependency_fingerprint: None,
+            root_revision_checksum: None,
             method_id: Some(uuid::Uuid::new_v4()),
             method_version: Some("01.00.000".to_owned()),
         };
@@ -562,6 +591,30 @@ mod tests {
         assert_eq!(decoded.config, config);
         assert_eq!(decoded.coverage, coverage);
         assert_eq!(decoded.payload, payload);
+        assert!(decoded.compiled_graph.is_none());
+
+        let graph = CompiledGraph {
+            processes: Vec::new(),
+            flows: Vec::new(),
+            provider_outputs: Vec::new(),
+            provider_decisions: Vec::new(),
+            technosphere_edges: Vec::new(),
+            biosphere_edges: Vec::new(),
+            reference_stats: CompiledReferenceStats::default(),
+            allocation_stats: CompiledAllocationStats::default(),
+            matching_stats: CompiledMatchingStats::default(),
+        };
+        let encoded_with_graph = encode_snapshot_artifact_with_graph(
+            snapshot_id,
+            config,
+            coverage,
+            &payload,
+            Some(graph),
+        )
+        .expect("encode with graph");
+        let decoded_with_graph =
+            decode_snapshot_artifact(encoded_with_graph.bytes.as_slice()).expect("decode graph");
+        assert!(decoded_with_graph.compiled_graph.is_some());
     }
 
     #[test]

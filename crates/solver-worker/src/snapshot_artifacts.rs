@@ -59,6 +59,9 @@ pub struct SnapshotBuildConfig {
     pub singular_eps: f64,
     /// Whether LCIA factors were enabled.
     pub has_lcia: bool,
+    /// Optional lifecycle / caller purpose for source-hash isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_purpose: Option<String>,
     /// Optional LCIA method id.
     pub method_id: Option<Uuid>,
     /// Optional LCIA method version.
@@ -435,6 +438,7 @@ mod tests {
             self_loop_cutoff: 0.999_999,
             singular_eps: 1e-12,
             has_lcia: true,
+            artifact_purpose: None,
             method_id: Some(uuid::Uuid::new_v4()),
             method_version: Some("01.00.000".to_owned()),
         };

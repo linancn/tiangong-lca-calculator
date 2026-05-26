@@ -16,11 +16,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use clap::Parser;
 use rayon::prelude::*;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use solver_core::{ModelSparseData, SparseTriplet};
 use solver_worker::compiled_graph::{
@@ -120,6 +120,12 @@ struct Cli {
     method_version: Option<String>,
     #[arg(long)]
     no_lcia: bool,
+    #[arg(long)]
+    artifact_purpose: Option<String>,
+    #[arg(long)]
+    artifact_expires_in_seconds: Option<i64>,
+    #[arg(long)]
+    reuse_max_age_seconds: Option<i64>,
     #[arg(long, default_value = "reports/snapshot-coverage")]
     report_dir: PathBuf,
 }
@@ -435,6 +441,8 @@ async fn main() -> anyhow::Result<()> {
     let method_started = Instant::now();
     let method = resolve_method_identity(&pool, &cli).await?;
     build_timing.resolve_method_identity_sec = method_started.elapsed().as_secs_f64();
+    let artifact_expires_in_seconds = positive_seconds(cli.artifact_expires_in_seconds);
+    let reuse_max_age_seconds = positive_seconds(cli.reuse_max_age_seconds);
     let build_config = SnapshotBuildConfig {
         process_states: process_states_label.clone(),
         include_user_id: cli.include_user_id,
@@ -449,6 +457,7 @@ async fn main() -> anyhow::Result<()> {
         self_loop_cutoff: cli.self_loop_cutoff,
         singular_eps: cli.singular_eps,
         has_lcia: method.has_lcia,
+        artifact_purpose: cli.artifact_purpose.clone(),
         method_id: method.method_id,
         method_version: method.method_version.clone(),
     };
@@ -518,6 +527,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("[info] lcia_method=disabled");
     }
+    if let Some(purpose) = cli.artifact_purpose.as_deref() {
+        println!("[info] artifact_purpose={purpose}");
+    }
+    if let Some(ttl_seconds) = artifact_expires_in_seconds {
+        println!("[info] artifact_expires_in_seconds={ttl_seconds}");
+    }
+    if let Some(max_age_seconds) = reuse_max_age_seconds {
+        println!("[info] reuse_max_age_seconds={max_age_seconds}");
+    }
     println!(
         "[source] processes={} max_modified_at={} flows={} max_modified_at={} lciamethods={} max_modified_at={}",
         source_summary.process_count,
@@ -571,7 +589,8 @@ async fn main() -> anyhow::Result<()> {
     let store = build_object_store(&cli)?;
 
     let reuse_lookup_started = Instant::now();
-    let reused_candidate = find_reusable_snapshot(&pool, &source_fingerprint).await?;
+    let reused_candidate =
+        find_reusable_snapshot(&pool, &source_fingerprint, reuse_max_age_seconds).await?;
     build_timing.reuse_lookup_sec = reuse_lookup_started.elapsed().as_secs_f64();
 
     if let Some(reused) = reused_candidate {
@@ -597,6 +616,9 @@ async fn main() -> anyhow::Result<()> {
                     "[reuse] matched existing ready snapshot={}",
                     reused.snapshot_id
                 );
+                if let Some(max_age_seconds) = reuse_max_age_seconds {
+                    println!("[reuse] max_age_seconds={max_age_seconds}");
+                }
                 println!(
                     "[build_timing_sec] {}",
                     serde_json::to_string(&build_timing)?
@@ -697,6 +719,8 @@ async fn main() -> anyhow::Result<()> {
         &encoded.sha256,
         i64::try_from(encoded.byte_size).map_err(|_| anyhow::anyhow!("artifact too large"))?,
         encoded.format,
+        cli.artifact_purpose.as_deref(),
+        artifact_expires_in_seconds,
     )
     .await?;
     build_timing.persist_metadata_sec = persist_started.elapsed().as_secs_f64();
@@ -806,6 +830,59 @@ fn derive_snapshot_index_url(artifact_url: &str) -> String {
     match artifact_url.rfind('/') {
         Some(idx) => format!("{}snapshot-index-v1.json", &artifact_url[..=idx]),
         None => format!("{artifact_url}/snapshot-index-v1.json"),
+    }
+}
+
+fn positive_seconds(value: Option<i64>) -> Option<i64> {
+    value.filter(|seconds| *seconds > 0)
+}
+
+fn artifact_expires_at_utc(ttl_seconds: Option<i64>) -> anyhow::Result<Option<String>> {
+    let Some(ttl_seconds) = ttl_seconds else {
+        return Ok(None);
+    };
+    let expires_at = Utc::now()
+        .checked_add_signed(TimeDelta::seconds(ttl_seconds))
+        .ok_or_else(|| anyhow::anyhow!("artifact expiration overflow: {ttl_seconds} seconds"))?;
+    Ok(Some(
+        expires_at.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string(),
+    ))
+}
+
+fn attach_artifact_lifecycle(
+    process_filter: &mut Value,
+    artifact_purpose: Option<&str>,
+    artifact_expires_in_seconds: Option<i64>,
+    artifact_expires_at_utc: Option<&str>,
+) {
+    if artifact_purpose.is_none()
+        && artifact_expires_in_seconds.is_none()
+        && artifact_expires_at_utc.is_none()
+    {
+        return;
+    }
+
+    let Some(root) = process_filter.as_object_mut() else {
+        return;
+    };
+    let mut lifecycle = Map::new();
+    if let Some(purpose) = artifact_purpose
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lifecycle.insert("purpose".to_owned(), Value::String(purpose.to_owned()));
+    }
+    if let Some(ttl_seconds) = artifact_expires_in_seconds {
+        lifecycle.insert("ttl_seconds".to_owned(), Value::from(ttl_seconds));
+    }
+    if let Some(expires_at) = artifact_expires_at_utc {
+        lifecycle.insert(
+            "expires_at_utc".to_owned(),
+            Value::String(expires_at.to_owned()),
+        );
+    }
+    if !lifecycle.is_empty() {
+        root.insert("artifact_lifecycle".to_owned(), Value::Object(lifecycle));
     }
 }
 
@@ -3100,8 +3177,11 @@ async fn compute_source_fingerprint(
     let (process_count, process_max_modified_at_utc) =
         summarize_selected_processes(selected_processes)?;
     let (flow_count, flow_max_modified_at_utc) = fetch_flow_source_summary(pool).await?;
-    let (lciamethod_count, lciamethod_max_modified_at_utc) =
-        fetch_lciamethod_source_summary(pool).await?;
+    let (lciamethod_count, lciamethod_max_modified_at_utc) = if config.has_lcia {
+        fetch_lciamethod_source_summary(pool).await?
+    } else {
+        (0, "disabled".to_owned())
+    };
 
     let summary = SourceSnapshotSummary {
         process_count,
@@ -3196,6 +3276,7 @@ async fn fetch_lciamethod_source_summary(pool: &PgPool) -> anyhow::Result<(i64, 
 async fn find_reusable_snapshot(
     pool: &PgPool,
     source_fingerprint: &str,
+    reuse_max_age_seconds: Option<i64>,
 ) -> anyhow::Result<Option<ReuseCandidate>> {
     let row = sqlx::query(
         r#"
@@ -3216,12 +3297,17 @@ async fn find_reusable_snapshot(
           AND a.status = 'ready'
           AND a.artifact_format = $2
           AND s.source_hash = $1
+          AND (
+            $3::bigint IS NULL
+            OR a.created_at >= now() - ($3::bigint * interval '1 second')
+          )
         ORDER BY a.created_at DESC
         LIMIT 1
         "#,
     )
     .bind(source_fingerprint)
     .bind(SNAPSHOT_ARTIFACT_FORMAT)
+    .bind(reuse_max_age_seconds)
     .fetch_optional(pool)
     .await?;
 
@@ -3574,8 +3660,11 @@ async fn persist_snapshot_metadata(
     artifact_sha256: &str,
     artifact_byte_size: i64,
     artifact_format: &str,
+    artifact_purpose: Option<&str>,
+    artifact_expires_in_seconds: Option<i64>,
 ) -> anyhow::Result<()> {
-    let process_filter = if all_states {
+    let artifact_expires_at_utc = artifact_expires_at_utc(artifact_expires_in_seconds)?;
+    let mut process_filter = if all_states {
         serde_json::json!({
             "all_states": true,
             "selection_mode": scope_summary.selection_mode,
@@ -3615,6 +3704,12 @@ async fn persist_snapshot_metadata(
             }
         })
     };
+    attach_artifact_lifecycle(
+        &mut process_filter,
+        artifact_purpose,
+        artifact_expires_in_seconds,
+        artifact_expires_at_utc.as_deref(),
+    );
 
     let mut tx = pool.begin().await?;
     sqlx::query(
@@ -4433,8 +4528,8 @@ mod tests {
     use super::{
         AllocationMode, Cli, ExchangeDirection, MultiProviderDecision, NormalizationMode,
         ParsedExchange, ProcessMeta, ProcessRow, ProviderRule, add_technosphere_edge,
-        biosphere_gross_value, candidate_count_bucket_label, compute_scope_hash, geo_score,
-        location_granularity_label, normalize_request_roots,
+        attach_artifact_lifecycle, biosphere_gross_value, candidate_count_bucket_label,
+        compute_scope_hash, geo_score, location_granularity_label, normalize_request_roots,
         parse_process_annual_supply_or_production_volume, parse_process_states,
         parse_provider_rule_list, resolve_allocation_fraction, resolve_multi_provider,
         resolve_process_selection, resolve_reference_normalization, summarize_matching_diagnostics,
@@ -4522,6 +4617,49 @@ mod tests {
     fn snapshot_builder_defaults_to_process_volume_provider_rule() {
         let cli = Cli::parse_from(["snapshot_builder"]);
         assert_eq!(cli.provider_rule, "split_by_process_volume");
+    }
+
+    #[test]
+    fn snapshot_builder_accepts_review_submit_lifecycle_flags() {
+        let cli = Cli::parse_from([
+            "snapshot_builder",
+            "--no-lcia",
+            "--artifact-purpose",
+            "review_submit_overlay",
+            "--artifact-expires-in-seconds",
+            "1209600",
+            "--reuse-max-age-seconds",
+            "1209600",
+        ]);
+
+        assert!(cli.no_lcia);
+        assert_eq!(
+            cli.artifact_purpose.as_deref(),
+            Some("review_submit_overlay")
+        );
+        assert_eq!(cli.artifact_expires_in_seconds, Some(1_209_600));
+        assert_eq!(cli.reuse_max_age_seconds, Some(1_209_600));
+    }
+
+    #[test]
+    fn artifact_lifecycle_metadata_is_attached_to_process_filter() {
+        let mut process_filter = json!({"all_states": false});
+
+        attach_artifact_lifecycle(
+            &mut process_filter,
+            Some("review_submit_overlay"),
+            Some(1_209_600),
+            Some("2026-06-09T00:00:00.000000Z"),
+        );
+
+        assert_eq!(
+            process_filter["artifact_lifecycle"],
+            json!({
+                "purpose": "review_submit_overlay",
+                "ttl_seconds": 1_209_600,
+                "expires_at_utc": "2026-06-09T00:00:00.000000Z"
+            })
+        );
     }
 
     #[test]

@@ -92,6 +92,10 @@ DB runner 当前支持 `dataset_table = processes`。它使用 gate run 的 `dat
 
 当前 snapshot artifact 持久化 `coverage + payload + config`，不持久化 `compiled_graph`。因此 DB runner 的 report 会消费 artifact 中的 coverage/payload，并补充单个提交 process 的 `process_records`；compiled-graph 级 flow semantic examples 仍由文件 CLI / library input 保留为增强能力。
 
+DB runner 默认通过 snapshot_builder 的 no-LCIA fast path 构造 review-submit snapshot。该路径不加载 `lciamethods` factors，不要求 `C` 矩阵非空，并在 snapshot config 中写入 `artifact_purpose = review_submit_overlay`，避免与普通计算 snapshot 共享 source hash 语义。
+
+no-LCIA fast path 的 source fingerprint 不包含 `lciamethods` count / max_modified_at，因此 LCIA method 或 factor 变化不会打断 review-submit submit-readiness snapshot 复用。
+
 ## 输出
 
 输出 schema version 为 `review_submit_gate_report.v1`，核心字段为：
@@ -123,11 +127,33 @@ DB runner 写回数据库时：
 - `allowed_scope_states = [0] + 100..=199`；`0` 表示提交审核前 draft root，`100..=199` 用于已审核 / 可用依赖数据兼容；`20` 等审核中状态不允许，仍会触发 `invalid_scope_state`。
 - provider missing、unresolved、equal fallback、allocation conservation 和 volume evidence 只记录在 `metrics.provider_scan`，不作为提交审核 blocker。
 - legacy provider policy 字段 `block_equal_fallback` / `block_provider_volume_fallback` 默认为 `false`；即使旧请求传入 `true`，review-submit gate 也不再据此产生 provider blocker。
-- impact-ready 提交要求 LCIA factors。
+- 默认不要求 LCIA factors；review-submit submit-readiness 只验证 `M` factorization 和 targeted `x/g` 稳定性。
+- `require_lcia_for_impact_submit = true` 仍作为显式 opt-in / legacy policy 路径保留；只有该字段为 `true` 且 `c_nnz = 0` 时才产生 `lcia_factor_missing_for_impact_submit`。
 - 要求 target process probe。
 - target probe 默认最多覆盖 `32` 个 process。
-- 默认执行 sparse factorization probe 和 targeted RHS solve。
+- 默认执行 sparse factorization probe 和 targeted RHS solve；target probe 请求 `return_x=true`、`return_g=true`、`return_h=false`。
 - 不执行完整矩阵求逆，不要求 full `solve_all_unit`。
+
+## Review-submit Snapshot 生命周期
+
+当前实现把 DB runner 生成的 full request-root review-submit snapshot 标记为 `review_submit_overlay`，作为提交审核诊断和短期复用 artifact，而不是长期计算 baseline。
+
+生命周期语义：
+
+- 默认 TTL：14 天，自 artifact 创建时间开始计算。
+- 过期语义：过期后不再作为新 gate run 的复用候选。
+- 删除语义：过期不是同步删除触发器；后台 GC 在保护检查通过后，才可以删除 object storage payload 和对应 DB artifact/snapshot metadata。
+- Supabase Storage / S3 兼容层不提供可依赖的 Object Lifecycle 自动删除；不要把 S3 `Expires` metadata 当作自动删除机制。
+- 复用查询必须过滤超过 review-submit TTL 的候选，即使 `source_hash` 匹配。
+
+保护条件：
+
+- queued / running gate run 仍可能引用的 artifact 不可删除。
+- 最近完成但仍处于诊断窗口内的 gate run artifact 不可删除。
+- active / pinned snapshot、in-flight result cache、factorization 或其他计算引用不可删除。
+- GC 应先 dry-run / audit，再协调删除 object storage payload 与 DB metadata，避免 DB 记录指向已不存在的对象。
+
+后续 baseline snapshot + draft overlay 拆分仍属于 calculator#61 的第二阶段：baseline 可采用更长的 last-use TTL，draft overlay 继续保持短 TTL。
 
 ## Blockers
 
@@ -144,7 +170,7 @@ DB runner 写回数据库时：
 | `duplicate_exchange_fingerprint` | 不同 process 的 flow/direction/amount fingerprint 完全一致 | 合并重复 process 或补充可区分 exchange |
 | `service_loop_detected` | 同一 process 中同一 flow 的 input/output amount 相同或近似相同 | 修正自供给、循环或拆分 process |
 | `flow_lcia_semantic_mismatch` | product/elementary flow 或 LCIA factor 语义错配 | 修复 flow kind、biosphere edge 或 LCIA factor mapping |
-| `lcia_factor_missing_for_impact_submit` | impact-ready 提交要求 LCIA factors，但 `c_nnz = 0` | 补齐 LCIA factors 或改用非 impact 提交策略 |
+| `lcia_factor_missing_for_impact_submit` | 显式 opt-in policy 要求 LCIA factors，但 `c_nnz = 0` | 补齐 LCIA factors 或关闭 LCIA-required policy |
 | `sparse_matrix_zero_or_near_zero_diagonal` | `M = I - A` 对角线为 0 / near-zero，或 payload process count 无效 | 修复自环、reference 或 matrix structure |
 | `duplicate_sparse_columns` | `M = I - A` 存在重复 sparse column signature | 排查重复结构和线性相关 process |
 | `target_process_not_covered_by_probe` | target process list 缺失、越界或超过 probe limit | 明确 submitted / changed process list，或拆分 gate |
@@ -165,7 +191,7 @@ Gate 按便宜到昂贵的顺序执行：
 4. flow / LCIA semantic scan。
 5. sparse structure scan：diagonal、duplicate sparse column。
 6. target process coverage check。
-7. 仅当以上没有 blocker 时，执行 sparse factorization readiness 与 targeted RHS solve。
+7. 仅当以上没有 blocker 时，执行 sparse factorization readiness 与 targeted RHS solve。默认 probe 只计算 `x/g`，不计算 LCIA `h`。
 
 这个顺序让历史事故模式在 full solve 之前被挡住。它不会 materialize inverse，也不会默认跑 full `solve_all_unit`。
 

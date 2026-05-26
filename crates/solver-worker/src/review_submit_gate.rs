@@ -71,7 +71,7 @@ impl Default for ReviewSubmitGatePolicy {
             allowed_scope_states: default_allowed_scope_states(),
             block_equal_fallback: false,
             block_provider_volume_fallback: false,
-            require_lcia_for_impact_submit: true,
+            require_lcia_for_impact_submit: false,
             require_target_process_probe: true,
             run_factorization_probe: true,
             target_probe_limit: default_target_probe_limit(),
@@ -785,14 +785,13 @@ fn run_target_probe(
             SolveOptions {
                 return_x: true,
                 return_g: true,
-                return_h: true,
+                return_h: false,
             },
         ) {
             Ok(result) => {
                 metrics.probe.target_indices_probed += 1;
                 metrics.probe.non_finite_value_count += non_finite_count(result.x.as_deref());
                 metrics.probe.non_finite_value_count += non_finite_count(result.g.as_deref());
-                metrics.probe.non_finite_value_count += non_finite_count(result.h.as_deref());
             }
             Err(error) => push_blocker(
                 blockers,
@@ -1122,6 +1121,39 @@ mod tests {
         assert_eq!(report.status, ReviewSubmitGateStatus::Blocked);
         assert!(has_blocker(&report, "invalid_scope_state"));
         assert_eq!(report.metrics.process_scan.invalid_scope_state_count, 1);
+        assert!(!report.metrics.probe.factorization_checked);
+    }
+
+    #[test]
+    fn default_policy_allows_no_lcia_snapshot() {
+        let mut input = clean_input();
+        input.coverage.matrix_scale.c_nnz = 0;
+        input.payload.characterization_factors.clear();
+
+        let report = verify_review_submit_gate(&input);
+
+        assert_eq!(report.status, ReviewSubmitGateStatus::Passed);
+        assert!(!has_blocker(
+            &report,
+            "lcia_factor_missing_for_impact_submit"
+        ));
+        assert_eq!(report.metrics.probe.target_indices_probed, 1);
+    }
+
+    #[test]
+    fn explicit_lcia_required_policy_still_blocks_missing_c_matrix() {
+        let mut input = clean_input();
+        input.policy.require_lcia_for_impact_submit = true;
+        input.coverage.matrix_scale.c_nnz = 0;
+        input.payload.characterization_factors.clear();
+
+        let report = verify_review_submit_gate(&input);
+
+        assert_eq!(report.status, ReviewSubmitGateStatus::Blocked);
+        assert!(has_blocker(
+            &report,
+            "lcia_factor_missing_for_impact_submit"
+        ));
         assert!(!report.metrics.probe.factorization_checked);
     }
 

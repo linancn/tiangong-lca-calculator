@@ -59,6 +59,8 @@ pub struct AppState {
 const DEFAULT_ALL_UNIT_BATCH_SIZE: usize = 128;
 const MAX_ALL_UNIT_BATCH_SIZE: usize = 2_048;
 const BUILD_SNAPSHOT_ADVISORY_LOCK_BASE: i64 = 0x5447_4c43_4253_4e50;
+const REVIEW_SUBMIT_SNAPSHOT_ARTIFACT_PURPOSE: &str = "review_submit_overlay";
+const REVIEW_SUBMIT_SNAPSHOT_TTL_SECONDS: i64 = 14 * 24 * 60 * 60;
 
 fn pgmq_queue_name_literal(queue_name: &str) -> anyhow::Result<String> {
     if queue_name
@@ -1198,6 +1200,10 @@ pub async fn handle_job_payload(state: &AppState, payload: JobPayload) -> anyhow
                 singular_eps,
                 method_id,
                 method_version.as_deref(),
+                None,
+                None,
+                None,
+                None,
                 no_lcia.unwrap_or(false),
             )
             .await;
@@ -1483,6 +1489,7 @@ pub(crate) async fn run_review_submit_gate_snapshot_builder(
     snapshot_id: Uuid,
     include_user_id: Uuid,
     request_roots: &[crate::graph_types::RequestRootProcess],
+    revision_checksum: &str,
 ) -> anyhow::Result<SnapshotBuilderExecution> {
     let lock_guard = acquire_build_snapshot_lock(
         &state.pool,
@@ -1503,7 +1510,11 @@ pub(crate) async fn run_review_submit_gate_snapshot_builder(
         None,
         None,
         None,
-        false,
+        Some(REVIEW_SUBMIT_SNAPSHOT_ARTIFACT_PURPOSE),
+        Some(REVIEW_SUBMIT_SNAPSHOT_TTL_SECONDS),
+        Some(REVIEW_SUBMIT_SNAPSHOT_TTL_SECONDS),
+        Some(revision_checksum),
+        true,
     )
     .await;
     let release_result = lock_guard.release().await;
@@ -1592,6 +1603,10 @@ async fn run_snapshot_builder_job(
     singular_eps: Option<f64>,
     method_id: Option<Uuid>,
     method_version: Option<&str>,
+    artifact_purpose: Option<&str>,
+    artifact_expires_in_seconds: Option<i64>,
+    reuse_max_age_seconds: Option<i64>,
+    review_submit_revision_checksum: Option<&str>,
     no_lcia: bool,
 ) -> anyhow::Result<SnapshotBuilderExecution> {
     let mut builder_args = vec![
@@ -1644,6 +1659,28 @@ async fn run_snapshot_builder_job(
     }
     if no_lcia {
         builder_args.push("--no-lcia".to_owned());
+    }
+    if let Some(purpose) = artifact_purpose
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder_args.push("--artifact-purpose".to_owned());
+        builder_args.push(purpose.to_owned());
+    }
+    if let Some(ttl_seconds) = artifact_expires_in_seconds.filter(|seconds| *seconds > 0) {
+        builder_args.push("--artifact-expires-in-seconds".to_owned());
+        builder_args.push(ttl_seconds.to_string());
+    }
+    if let Some(max_age_seconds) = reuse_max_age_seconds.filter(|seconds| *seconds > 0) {
+        builder_args.push("--reuse-max-age-seconds".to_owned());
+        builder_args.push(max_age_seconds.to_string());
+    }
+    if let Some(checksum) = review_submit_revision_checksum
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder_args.push("--review-submit-revision-checksum".to_owned());
+        builder_args.push(checksum.to_owned());
     }
 
     let candidates = snapshot_builder_candidates(builder_args);

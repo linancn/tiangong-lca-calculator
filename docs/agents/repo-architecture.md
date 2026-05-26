@@ -33,7 +33,7 @@ checkPaths:
   - scripts/docpact-gate.sh
   - scripts/install-git-hooks.sh
 lastReviewedAt: 2026-05-26
-lastReviewedCommit: b6137656059cb16531e2d97e2bbdbacbfdf0fff6
+lastReviewedCommit: ab530bbb10c283bd1379d674c24554173610d654
 related:
   - ../../AGENTS.md
   - ../../.docpact/config.yaml
@@ -106,7 +106,7 @@ The modeling basis for implicit regional supply mix, exchange-location supply-re
 
 `crates/solver-worker/src/review_submit_gate.rs` owns the calculator-side fast gate for dataset revision review submission. It layers revision freshness, process/exchange scans, provider evidence, sparse structural checks, and targeted RHS probes into a binary `passed` / `blocked` report without full matrix inversion or full `solve_all_unit`.
 
-`crates/solver-worker/src/review_submit_gate_runner.rs` and `crates/solver-worker/src/bin/review_submit_gate_runner.rs` are the DB runtime bridge for that gate. The runner claims persisted `dataset_review_submit_gate_runs`, builds a request-root snapshot for the submitted process revision, computes the `json_ordered` checksum, executes `review_submit_gate`, and records the result through the database RPC. Edge and Next consume the DB status; they do not run calculator-side numerical checks.
+`crates/solver-worker/src/review_submit_gate_runner.rs` and `crates/solver-worker/src/bin/review_submit_gate_runner.rs` are the DB runtime bridge for that gate. The runner claims persisted `dataset_review_submit_gate_runs`, builds a no-LCIA review-submit baseline plus draft overlay snapshot for the submitted process revision, computes the `json_ordered` checksum, executes `review_submit_gate`, and records the result through the database RPC. Edge and Next consume the DB status; they do not run calculator-side numerical checks.
 
 ### Package worker
 

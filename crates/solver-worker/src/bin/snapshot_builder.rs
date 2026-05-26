@@ -16,11 +16,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use clap::Parser;
 use rayon::prelude::*;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use solver_core::{ModelSparseData, SparseTriplet};
 use solver_worker::compiled_graph::{
@@ -28,8 +28,8 @@ use solver_worker::compiled_graph::{
     CompiledFlowKind, CompiledGraph, CompiledMatchingStats, CompiledProcess,
     CompiledProviderAllocation, CompiledProviderCandidate, CompiledProviderDecision,
     CompiledProviderDecisionKind, CompiledProviderFailureReason, CompiledProviderGeographyTier,
-    CompiledProviderResolutionStrategy, CompiledProviderSupplyRegionSource, CompiledReferenceStats,
-    CompiledTechnosphereEdge,
+    CompiledProviderOutput, CompiledProviderResolutionStrategy, CompiledProviderSupplyRegionSource,
+    CompiledReferenceStats, CompiledTechnosphereEdge,
 };
 use solver_worker::graph_types::{
     RequestRootProcess, ResolvedScopeProcess, ScopeProcessPartition, SnapshotSelectionMode,
@@ -44,13 +44,17 @@ use solver_worker::snapshot_artifacts::{
     SnapshotMatchingCoverage, SnapshotMatrixScale, SnapshotProcessGapEntry,
     SnapshotProviderDecisionDiagnostics, SnapshotReferenceCoverage, SnapshotResolutionSummary,
     SnapshotSingularRisk, SnapshotUnmatchedFlowEntry, SnapshotVolumeWeightSummary,
-    encode_snapshot_artifact,
+    decode_snapshot_artifact, encode_snapshot_artifact, encode_snapshot_artifact_with_graph,
 };
 use solver_worker::snapshot_index::{
     SnapshotImpactMapEntry, SnapshotIndexDocument, SnapshotProcessMapEntry,
 };
 use solver_worker::storage::ObjectStoreClient;
 use uuid::Uuid;
+
+const REVIEW_SUBMIT_OVERLAY_ARTIFACT_PURPOSE: &str = "review_submit_overlay";
+const REVIEW_SUBMIT_BASELINE_ARTIFACT_PURPOSE: &str = "review_submit_baseline";
+const REVIEW_SUBMIT_BASELINE_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "snapshot-builder")]
@@ -120,6 +124,14 @@ struct Cli {
     method_version: Option<String>,
     #[arg(long)]
     no_lcia: bool,
+    #[arg(long)]
+    artifact_purpose: Option<String>,
+    #[arg(long)]
+    artifact_expires_in_seconds: Option<i64>,
+    #[arg(long)]
+    reuse_max_age_seconds: Option<i64>,
+    #[arg(long)]
+    review_submit_revision_checksum: Option<String>,
     #[arg(long, default_value = "reports/snapshot-coverage")]
     report_dir: PathBuf,
 }
@@ -237,6 +249,7 @@ struct BuildOutput {
     coverage: SnapshotCoverageReport,
     snapshot_index: SnapshotIndexDocument,
     readiness: MatrixReadinessReport,
+    compiled_graph: CompiledGraph,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -308,6 +321,8 @@ struct ResolvedProcessSelection {
 #[derive(Debug, Clone, Default, Serialize)]
 struct BuildTimingSec {
     reused_snapshot: bool,
+    review_submit_baseline_reused: bool,
+    review_submit_overlay_reused: bool,
     total_sec: f64,
     resolve_method_identity_sec: f64,
     compute_source_fingerprint_sec: f64,
@@ -435,6 +450,8 @@ async fn main() -> anyhow::Result<()> {
     let method_started = Instant::now();
     let method = resolve_method_identity(&pool, &cli).await?;
     build_timing.resolve_method_identity_sec = method_started.elapsed().as_secs_f64();
+    let artifact_expires_in_seconds = positive_seconds(cli.artifact_expires_in_seconds);
+    let reuse_max_age_seconds = positive_seconds(cli.reuse_max_age_seconds);
     let build_config = SnapshotBuildConfig {
         process_states: process_states_label.clone(),
         include_user_id: cli.include_user_id,
@@ -449,6 +466,9 @@ async fn main() -> anyhow::Result<()> {
         self_loop_cutoff: cli.self_loop_cutoff,
         singular_eps: cli.singular_eps,
         has_lcia: method.has_lcia,
+        artifact_purpose: cli.artifact_purpose.clone(),
+        root_dependency_fingerprint: None,
+        root_revision_checksum: cli.review_submit_revision_checksum.clone(),
         method_id: method.method_id,
         method_version: method.method_version.clone(),
     };
@@ -518,6 +538,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("[info] lcia_method=disabled");
     }
+    if let Some(purpose) = cli.artifact_purpose.as_deref() {
+        println!("[info] artifact_purpose={purpose}");
+    }
+    if let Some(ttl_seconds) = artifact_expires_in_seconds {
+        println!("[info] artifact_expires_in_seconds={ttl_seconds}");
+    }
+    if let Some(max_age_seconds) = reuse_max_age_seconds {
+        println!("[info] reuse_max_age_seconds={max_age_seconds}");
+    }
     println!(
         "[source] processes={} max_modified_at={} flows={} max_modified_at={} lciamethods={} max_modified_at={}",
         source_summary.process_count,
@@ -570,8 +599,32 @@ async fn main() -> anyhow::Result<()> {
 
     let store = build_object_store(&cli)?;
 
+    if is_review_submit_overlay_mode(&cli, &request_roots) {
+        return run_review_submit_overlay_build(
+            &pool,
+            &store,
+            &cli,
+            requested_snapshot_id,
+            total_started,
+            all_states,
+            &state_codes,
+            cli.include_user_id,
+            &request_roots,
+            resolved_scope,
+            build_config,
+            method,
+            provider_rule,
+            reference_normalization_mode,
+            allocation_mode,
+            artifact_expires_in_seconds,
+            reuse_max_age_seconds,
+        )
+        .await;
+    }
+
     let reuse_lookup_started = Instant::now();
-    let reused_candidate = find_reusable_snapshot(&pool, &source_fingerprint).await?;
+    let reused_candidate =
+        find_reusable_snapshot(&pool, &source_fingerprint, reuse_max_age_seconds).await?;
     build_timing.reuse_lookup_sec = reuse_lookup_started.elapsed().as_secs_f64();
 
     if let Some(reused) = reused_candidate {
@@ -597,6 +650,9 @@ async fn main() -> anyhow::Result<()> {
                     "[reuse] matched existing ready snapshot={}",
                     reused.snapshot_id
                 );
+                if let Some(max_age_seconds) = reuse_max_age_seconds {
+                    println!("[reuse] max_age_seconds={max_age_seconds}");
+                }
                 println!(
                     "[build_timing_sec] {}",
                     serde_json::to_string(&build_timing)?
@@ -697,6 +753,8 @@ async fn main() -> anyhow::Result<()> {
         &encoded.sha256,
         i64::try_from(encoded.byte_size).map_err(|_| anyhow::anyhow!("artifact too large"))?,
         encoded.format,
+        cli.artifact_purpose.as_deref(),
+        artifact_expires_in_seconds,
     )
     .await?;
     build_timing.persist_metadata_sec = persist_started.elapsed().as_secs_f64();
@@ -806,6 +864,914 @@ fn derive_snapshot_index_url(artifact_url: &str) -> String {
     match artifact_url.rfind('/') {
         Some(idx) => format!("{}snapshot-index-v1.json", &artifact_url[..=idx]),
         None => format!("{artifact_url}/snapshot-index-v1.json"),
+    }
+}
+
+fn positive_seconds(value: Option<i64>) -> Option<i64> {
+    value.filter(|seconds| *seconds > 0)
+}
+
+fn artifact_expires_at_utc(ttl_seconds: Option<i64>) -> anyhow::Result<Option<String>> {
+    let Some(ttl_seconds) = ttl_seconds else {
+        return Ok(None);
+    };
+    let expires_at = Utc::now()
+        .checked_add_signed(TimeDelta::seconds(ttl_seconds))
+        .ok_or_else(|| anyhow::anyhow!("artifact expiration overflow: {ttl_seconds} seconds"))?;
+    Ok(Some(
+        expires_at.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string(),
+    ))
+}
+
+fn attach_artifact_lifecycle(
+    process_filter: &mut Value,
+    artifact_purpose: Option<&str>,
+    artifact_expires_in_seconds: Option<i64>,
+    artifact_expires_at_utc: Option<&str>,
+) {
+    if artifact_purpose.is_none()
+        && artifact_expires_in_seconds.is_none()
+        && artifact_expires_at_utc.is_none()
+    {
+        return;
+    }
+
+    let Some(root) = process_filter.as_object_mut() else {
+        return;
+    };
+    let mut lifecycle = Map::new();
+    if let Some(purpose) = artifact_purpose
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lifecycle.insert("purpose".to_owned(), Value::String(purpose.to_owned()));
+    }
+    if let Some(ttl_seconds) = artifact_expires_in_seconds {
+        lifecycle.insert("ttl_seconds".to_owned(), Value::from(ttl_seconds));
+    }
+    if let Some(expires_at) = artifact_expires_at_utc {
+        lifecycle.insert(
+            "expires_at_utc".to_owned(),
+            Value::String(expires_at.to_owned()),
+        );
+    }
+    if !lifecycle.is_empty() {
+        root.insert("artifact_lifecycle".to_owned(), Value::Object(lifecycle));
+    }
+}
+
+fn is_review_submit_overlay_mode(cli: &Cli, request_roots: &[RequestRootProcess]) -> bool {
+    cli.artifact_purpose.as_deref() == Some(REVIEW_SUBMIT_OVERLAY_ARTIFACT_PURPOSE)
+        && request_roots.len() == 1
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_review_submit_overlay_build(
+    pool: &PgPool,
+    store: &ObjectStoreClient,
+    cli: &Cli,
+    requested_snapshot_id: Option<Uuid>,
+    total_started: Instant,
+    all_states: bool,
+    state_codes: &[i32],
+    include_user_id: Option<Uuid>,
+    request_roots: &[RequestRootProcess],
+    resolved_scope: ResolvedProcessSelection,
+    build_config: SnapshotBuildConfig,
+    method: MethodSelection,
+    provider_rule: ProviderRule,
+    reference_normalization_mode: NormalizationMode,
+    allocation_mode: AllocationMode,
+    artifact_expires_in_seconds: Option<i64>,
+    reuse_max_age_seconds: Option<i64>,
+) -> anyhow::Result<()> {
+    if method.has_lcia {
+        return Err(anyhow::anyhow!(
+            "review-submit overlay mode requires --no-lcia"
+        ));
+    }
+    let Some(requested_snapshot_id) = requested_snapshot_id else {
+        return Err(anyhow::anyhow!(
+            "review-submit overlay mode requires --snapshot-id"
+        ));
+    };
+    let root = request_roots
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("review-submit overlay mode requires one root process"))?;
+    let target_pos = resolved_scope
+        .processes
+        .iter()
+        .position(|row| row.id == root.process_id && row.version.trim() == root.process_version);
+    let Some(target_pos) = target_pos else {
+        return Err(anyhow::anyhow!(
+            "review-submit root process not found in resolved scope: {root}"
+        ));
+    };
+    let target_row = resolved_scope.processes[target_pos].clone();
+    let baseline_processes = resolved_scope
+        .processes
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, row)| (idx != target_pos).then_some(row.clone()))
+        .collect::<Vec<_>>();
+    let baseline_scope_summary =
+        review_submit_baseline_scope_summary(&resolved_scope.scope_summary, root)?;
+    let root_dependency_fingerprint = review_submit_root_dependency_fingerprint(&target_row)?;
+    let root_revision_checksum = match cli.review_submit_revision_checksum.clone() {
+        Some(checksum) => checksum,
+        None => stable_json_sha256(&target_row.json)?,
+    };
+
+    let mut baseline_config = build_config.clone();
+    baseline_config.artifact_purpose = Some(REVIEW_SUBMIT_BASELINE_ARTIFACT_PURPOSE.to_owned());
+    baseline_config.root_dependency_fingerprint = Some(root_dependency_fingerprint.clone());
+    baseline_config.root_revision_checksum = None;
+    let (baseline_source_summary, baseline_source_hash) =
+        compute_source_fingerprint(pool, &baseline_processes, &baseline_config).await?;
+
+    let mut overlay_config = build_config.clone();
+    overlay_config.artifact_purpose = Some(REVIEW_SUBMIT_OVERLAY_ARTIFACT_PURPOSE.to_owned());
+    overlay_config.root_dependency_fingerprint = Some(root_dependency_fingerprint);
+    overlay_config.root_revision_checksum = Some(root_revision_checksum.clone());
+    let overlay_source_hash =
+        compute_review_submit_overlay_source_hash(&baseline_source_hash, &overlay_config)?;
+
+    println!("[review_submit] mode=baseline_overlay");
+    println!("[review_submit] baseline_source_fingerprint={baseline_source_hash}");
+    println!("[review_submit] overlay_source_fingerprint={overlay_source_hash}");
+
+    let mut build_timing = BuildTimingSec::default();
+    let overlay_reuse_started = Instant::now();
+    if let Some(reused_overlay) =
+        find_reusable_snapshot(pool, &overlay_source_hash, reuse_max_age_seconds).await?
+    {
+        let snapshot_index_url = derive_snapshot_index_url(&reused_overlay.artifact_url);
+        if store.download_object_url(&snapshot_index_url).await.is_ok() {
+            build_timing.reused_snapshot = true;
+            build_timing.review_submit_overlay_reused = true;
+            build_timing.reuse_lookup_sec = overlay_reuse_started.elapsed().as_secs_f64();
+            build_timing.total_sec = total_started.elapsed().as_secs_f64();
+            write_report_files(
+                &cli.report_dir,
+                reused_overlay.snapshot_id,
+                &overlay_config,
+                &resolved_scope.scope_summary,
+                &reused_overlay.coverage,
+                &reused_overlay.artifact_url,
+                &baseline_source_summary,
+                &overlay_source_hash,
+                &build_timing,
+            )?;
+            println!(
+                "[reuse] matched existing review-submit overlay snapshot={}",
+                reused_overlay.snapshot_id
+            );
+            println!(
+                "[build_timing_sec] {}",
+                serde_json::to_string(&build_timing)?
+            );
+            println!("[resolved_snapshot_id] {}", reused_overlay.snapshot_id);
+            println!("[done] snapshot ready: {}", reused_overlay.snapshot_id);
+            println!("[artifact] {}", reused_overlay.artifact_url);
+            println!("[snapshot_index] {snapshot_index_url}");
+            println!(
+                "[matrix] process_count={} flow_count={} impact_count={} a_nnz={} b_nnz={} c_nnz={}",
+                reused_overlay.process_count,
+                reused_overlay.flow_count,
+                reused_overlay.impact_count,
+                reused_overlay.a_nnz,
+                reused_overlay.b_nnz,
+                reused_overlay.c_nnz
+            );
+            return Ok(());
+        }
+    }
+    build_timing.reuse_lookup_sec = overlay_reuse_started.elapsed().as_secs_f64();
+
+    let baseline_started = Instant::now();
+    let baseline_graph = load_or_build_review_submit_baseline(
+        pool,
+        store,
+        cli,
+        all_states,
+        state_codes,
+        include_user_id,
+        &baseline_scope_summary,
+        &baseline_processes,
+        &baseline_config,
+        &baseline_source_hash,
+        &baseline_source_summary,
+        &method,
+        provider_rule,
+        reference_normalization_mode,
+        allocation_mode,
+        reuse_max_age_seconds,
+        &mut build_timing,
+    )
+    .await?;
+    build_timing.build_sparse_payload_sec += baseline_started.elapsed().as_secs_f64();
+
+    let overlay_started = Instant::now();
+    let overlay_graph = build_review_submit_overlay_graph(
+        pool,
+        &baseline_graph,
+        &target_row,
+        include_user_id,
+        provider_rule,
+        reference_normalization_mode,
+        allocation_mode,
+    )
+    .await?;
+    let built = assemble_sparse_payload(
+        requested_snapshot_id,
+        &method,
+        &overlay_graph,
+        cli.self_loop_cutoff,
+        cli.singular_eps,
+        false,
+        &[],
+    )?;
+    build_timing.build_sparse_payload_sec += overlay_started.elapsed().as_secs_f64();
+
+    let artifact_url = persist_built_snapshot_artifact(
+        pool,
+        store,
+        requested_snapshot_id,
+        &cli.provider_rule,
+        all_states,
+        state_codes,
+        include_user_id,
+        &resolved_scope.scope_summary,
+        &overlay_source_hash,
+        &method,
+        &built,
+        &overlay_config,
+        None,
+        artifact_expires_in_seconds,
+        &mut build_timing,
+    )
+    .await?;
+    build_timing.total_sec = total_started.elapsed().as_secs_f64();
+
+    let snapshot_index_url = derive_snapshot_index_url(&artifact_url);
+    write_report_files(
+        &cli.report_dir,
+        requested_snapshot_id,
+        &overlay_config,
+        &resolved_scope.scope_summary,
+        &built.coverage,
+        &artifact_url,
+        &baseline_source_summary,
+        &overlay_source_hash,
+        &build_timing,
+    )?;
+    let readiness_path = write_matrix_readiness_report_file(
+        &cli.report_dir,
+        requested_snapshot_id,
+        &built.readiness,
+    )?;
+
+    println!(
+        "[build_timing_sec] {}",
+        serde_json::to_string(&build_timing)?
+    );
+    println!("[resolved_snapshot_id] {requested_snapshot_id}");
+    println!("[done] snapshot ready: {requested_snapshot_id}");
+    println!("[artifact] {artifact_url}");
+    println!("[snapshot_index] {snapshot_index_url}");
+    println!(
+        "[matrix] process_count={} flow_count={} a_nnz={} b_nnz={} c_nnz={}",
+        built.data.process_count,
+        built.data.flow_count,
+        built.coverage.matrix_scale.a_nnz,
+        built.coverage.matrix_scale.b_nnz,
+        built.coverage.matrix_scale.c_nnz
+    );
+    println!(
+        "[coverage] unique_match={} any_match={} singular_risk={}",
+        built.coverage.matching.unique_provider_match_pct,
+        built.coverage.matching.any_provider_match_pct,
+        built.coverage.singular_risk.risk_level
+    );
+    println!("[matrix_readiness_report] {}", readiness_path.display());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_or_build_review_submit_baseline(
+    pool: &PgPool,
+    store: &ObjectStoreClient,
+    cli: &Cli,
+    all_states: bool,
+    state_codes: &[i32],
+    include_user_id: Option<Uuid>,
+    scope_summary: &ResolvedRequestScopeSummary,
+    baseline_processes: &[ProcessRow],
+    baseline_config: &SnapshotBuildConfig,
+    baseline_source_hash: &str,
+    baseline_source_summary: &SourceSnapshotSummary,
+    method: &MethodSelection,
+    provider_rule: ProviderRule,
+    reference_normalization_mode: NormalizationMode,
+    allocation_mode: AllocationMode,
+    reuse_max_age_seconds: Option<i64>,
+    build_timing: &mut BuildTimingSec,
+) -> anyhow::Result<CompiledGraph> {
+    if let Some(reused) = find_reusable_snapshot_with_age_basis(
+        pool,
+        baseline_source_hash,
+        reuse_max_age_seconds.or(Some(REVIEW_SUBMIT_BASELINE_TTL_SECONDS)),
+        true,
+    )
+    .await?
+    {
+        match store.download_object_url(&reused.artifact_url).await {
+            Ok(bytes) => {
+                let decoded = decode_snapshot_artifact(&bytes)?;
+                if let Some(graph) = decoded.compiled_graph {
+                    touch_reused_snapshot_artifact(
+                        pool,
+                        reused.snapshot_id,
+                        SNAPSHOT_ARTIFACT_FORMAT,
+                        Some(REVIEW_SUBMIT_BASELINE_TTL_SECONDS),
+                    )
+                    .await?;
+                    build_timing.review_submit_baseline_reused = true;
+                    println!(
+                        "[review_submit] baseline_snapshot_id={} reused=true",
+                        reused.snapshot_id
+                    );
+                    return Ok(graph);
+                }
+                println!(
+                    "[review_submit] skip baseline snapshot={} because compiled graph metadata is missing",
+                    reused.snapshot_id
+                );
+            }
+            Err(error) => {
+                println!(
+                    "[review_submit] skip baseline snapshot={} because artifact download failed: {}",
+                    reused.snapshot_id, error
+                );
+            }
+        }
+    }
+
+    if baseline_processes.is_empty() {
+        println!("[review_submit] baseline_snapshot_id=none empty_dependency_scope=true");
+        return Ok(empty_compiled_graph());
+    }
+
+    let baseline_snapshot_id = Uuid::new_v4();
+    let built = build_sparse_payload(
+        pool,
+        baseline_snapshot_id,
+        method,
+        baseline_processes.to_vec(),
+        include_user_id,
+        provider_rule,
+        reference_normalization_mode,
+        allocation_mode,
+        cli.self_loop_cutoff,
+        cli.singular_eps,
+        false,
+        &[],
+    )
+    .await?;
+    let artifact_url = persist_built_snapshot_artifact(
+        pool,
+        store,
+        baseline_snapshot_id,
+        &cli.provider_rule,
+        all_states,
+        state_codes,
+        include_user_id,
+        scope_summary,
+        baseline_source_hash,
+        method,
+        &built,
+        baseline_config,
+        Some(built.compiled_graph.clone()),
+        Some(REVIEW_SUBMIT_BASELINE_TTL_SECONDS),
+        build_timing,
+    )
+    .await?;
+    write_report_files(
+        &cli.report_dir,
+        baseline_snapshot_id,
+        baseline_config,
+        scope_summary,
+        &built.coverage,
+        &artifact_url,
+        baseline_source_summary,
+        baseline_source_hash,
+        build_timing,
+    )?;
+    println!("[review_submit] baseline_snapshot_id={baseline_snapshot_id} reused=false");
+    Ok(built.compiled_graph)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_built_snapshot_artifact(
+    pool: &PgPool,
+    store: &ObjectStoreClient,
+    snapshot_id: Uuid,
+    provider_rule: &str,
+    all_states: bool,
+    state_codes: &[i32],
+    include_user_id: Option<Uuid>,
+    scope_summary: &ResolvedRequestScopeSummary,
+    source_hash: &str,
+    method: &MethodSelection,
+    built: &BuildOutput,
+    config: &SnapshotBuildConfig,
+    compiled_graph: Option<CompiledGraph>,
+    artifact_expires_in_seconds: Option<i64>,
+    build_timing: &mut BuildTimingSec,
+) -> anyhow::Result<String> {
+    let encode_started = Instant::now();
+    let encoded = encode_snapshot_artifact_with_graph(
+        snapshot_id,
+        config.clone(),
+        built.coverage.clone(),
+        &built.data,
+        compiled_graph,
+    )?;
+    build_timing.encode_artifact_sec += encode_started.elapsed().as_secs_f64();
+
+    let upload_started = Instant::now();
+    let artifact_url = store
+        .upload_snapshot_artifact(
+            snapshot_id,
+            encoded.extension,
+            encoded.content_type,
+            encoded.bytes,
+        )
+        .await?;
+    build_timing.upload_artifact_sec += upload_started.elapsed().as_secs_f64();
+
+    let snapshot_index_bytes = serde_json::to_vec(&built.snapshot_index)?;
+    let upload_snapshot_index_started = Instant::now();
+    store
+        .upload_snapshot_index(snapshot_id, snapshot_index_bytes)
+        .await?;
+    build_timing.upload_snapshot_index_sec += upload_snapshot_index_started.elapsed().as_secs_f64();
+
+    let persist_started = Instant::now();
+    persist_snapshot_metadata(
+        pool,
+        snapshot_id,
+        provider_rule,
+        all_states,
+        state_codes,
+        include_user_id,
+        scope_summary,
+        source_hash,
+        method,
+        built,
+        &artifact_url,
+        &encoded.sha256,
+        i64::try_from(encoded.byte_size).map_err(|_| anyhow::anyhow!("artifact too large"))?,
+        encoded.format,
+        config.artifact_purpose.as_deref(),
+        artifact_expires_in_seconds,
+    )
+    .await?;
+    build_timing.persist_metadata_sec += persist_started.elapsed().as_secs_f64();
+
+    Ok(artifact_url)
+}
+
+fn empty_compiled_graph() -> CompiledGraph {
+    CompiledGraph {
+        processes: Vec::new(),
+        flows: Vec::new(),
+        provider_outputs: Vec::new(),
+        provider_decisions: Vec::new(),
+        technosphere_edges: Vec::new(),
+        biosphere_edges: Vec::new(),
+        reference_stats: CompiledReferenceStats::default(),
+        allocation_stats: CompiledAllocationStats::default(),
+        matching_stats: CompiledMatchingStats::default(),
+    }
+}
+
+async fn build_review_submit_overlay_graph(
+    pool: &PgPool,
+    baseline_graph: &CompiledGraph,
+    target_row: &ProcessRow,
+    include_user_id: Option<Uuid>,
+    provider_rule: ProviderRule,
+    reference_normalization_mode: NormalizationMode,
+    allocation_mode: AllocationMode,
+) -> anyhow::Result<CompiledGraph> {
+    let mut graph = baseline_graph.clone();
+    let target_idx = i32::try_from(graph.processes.len())
+        .map_err(|_| anyhow::anyhow!("overlay target index overflow"))?;
+    let (target_meta, target_exchanges, target_flow_ids, target_reference, target_allocation) =
+        parse_process_chunk(
+            target_row,
+            target_idx,
+            reference_normalization_mode,
+            allocation_mode,
+        )?;
+    let target_partition = classify_scope_partition(target_row, include_user_id);
+    graph.processes.push(CompiledProcess {
+        process_idx: target_meta.process_idx,
+        process_id: target_meta.process_id,
+        process_version: target_meta.process_version.clone(),
+        process_name: target_meta.process_name.clone(),
+        model_id: target_meta.model_id,
+        location: target_meta.location.clone(),
+        reference_year: target_meta.reference_year,
+        annual_supply_or_production_volume: target_meta.annual_supply_or_production_volume,
+        partition: target_partition,
+    });
+    graph.reference_stats.missing_reference += target_reference.missing_reference;
+    graph.reference_stats.invalid_reference += target_reference.invalid_reference;
+    graph.reference_stats.normalized_processes += target_reference.normalized_processes;
+    graph.allocation_stats.exchange_total += target_allocation.exchange_total;
+    graph.allocation_stats.fraction_present_count += target_allocation.fraction_present_count;
+    graph.allocation_stats.fraction_missing_count += target_allocation.fraction_missing_count;
+    graph.allocation_stats.fraction_invalid_count += target_allocation.fraction_invalid_count;
+
+    let mut flow_idx_by_id = graph
+        .flows
+        .iter()
+        .map(|flow| (flow.flow_id, flow.flow_idx))
+        .collect::<HashMap<_, _>>();
+    let missing_flow_ids = target_flow_ids
+        .iter()
+        .copied()
+        .filter(|flow_id| !flow_idx_by_id.contains_key(flow_id))
+        .collect::<BTreeSet<_>>();
+    let flow_meta = fetch_flow_meta(pool, &missing_flow_ids).await?;
+    for flow_id in missing_flow_ids {
+        let flow_idx =
+            i32::try_from(graph.flows.len()).map_err(|_| anyhow::anyhow!("flow idx overflow"))?;
+        let kind = if flow_meta
+            .get(&flow_id)
+            .is_some_and(|meta| classify_flow_kind(meta) == "elementary")
+        {
+            CompiledFlowKind::Elementary
+        } else {
+            CompiledFlowKind::Product
+        };
+        graph.flows.push(CompiledFlow {
+            flow_idx,
+            flow_id,
+            kind,
+        });
+        flow_idx_by_id.insert(flow_id, flow_idx);
+    }
+    let elementary_flow_idx = graph
+        .flows
+        .iter()
+        .filter_map(|flow| (flow.kind == CompiledFlowKind::Elementary).then_some(flow.flow_idx))
+        .collect::<HashSet<_>>();
+
+    for ex in &target_exchanges {
+        if ex.direction == ExchangeDirection::Output {
+            graph.provider_outputs.push(CompiledProviderOutput {
+                flow_id: ex.flow_id,
+                provider_idx: target_idx,
+            });
+        }
+    }
+
+    let mut process_meta = graph
+        .processes
+        .iter()
+        .map(process_meta_from_compiled)
+        .collect::<Vec<_>>();
+    process_meta.sort_by_key(|meta| meta.process_idx);
+    let mut provider_map = HashMap::<Uuid, Vec<i32>>::new();
+    for output in &graph.provider_outputs {
+        provider_map
+            .entry(output.flow_id)
+            .or_default()
+            .push(output.provider_idx);
+    }
+    for providers in provider_map.values_mut() {
+        providers.sort_by_key(|idx| {
+            process_meta_for_idx(&process_meta, *idx).map_or(Uuid::nil(), |meta| meta.process_id)
+        });
+        providers.dedup();
+    }
+    graph.provider_outputs = provider_outputs_from_map(&provider_map);
+
+    let target_process = compiled_process_for_idx(&graph.processes, target_idx)
+        .ok_or_else(|| anyhow::anyhow!("missing overlay target process"))?
+        .clone();
+    for ex in &target_exchanges {
+        if let Some(flow_idx) = flow_idx_by_id.get(&ex.flow_id).copied()
+            && elementary_flow_idx.contains(&flow_idx)
+            && let Some(amount) = ex.amount
+        {
+            let value = biosphere_gross_value(amount);
+            if value.abs() > f64::EPSILON {
+                graph.biosphere_edges.push(CompiledBiosphereEdge {
+                    process_idx: target_idx,
+                    flow_idx,
+                    amount: value,
+                    process_partition: target_partition,
+                });
+            }
+        }
+
+        if ex.direction != ExchangeDirection::Input {
+            continue;
+        }
+        let Some(amount) = ex.amount else {
+            continue;
+        };
+        let supply_region_anchor = supply_region_anchor_for_exchange(ex, &process_meta)?;
+        graph.matching_stats.input_edges_total += 1;
+        let providers = provider_map.get(&ex.flow_id);
+        let provider_candidates = provider_candidates_for_indices(providers, &process_meta)?;
+        let candidate_provider_count = i32::try_from(providers.map_or(0, Vec::len))
+            .map_err(|_| anyhow::anyhow!("providers"))?;
+        if candidate_provider_count == 1 {
+            graph.matching_stats.matched_unique_provider += 1;
+            graph.matching_stats.a_input_edges_written += 1;
+            let provider_idx = *providers
+                .and_then(|vec| vec.first())
+                .ok_or_else(|| anyhow::anyhow!("missing provider idx"))?;
+            let provider_meta =
+                process_meta_for_idx(&process_meta, provider_idx).ok_or_else(|| {
+                    anyhow::anyhow!("missing provider process meta idx={provider_idx}")
+                })?;
+            graph.provider_decisions.push(CompiledProviderDecision {
+                consumer_idx: target_idx,
+                flow_id: ex.flow_id,
+                candidate_provider_count,
+                matched_provider_count: 1,
+                candidates: provider_candidates,
+                decision_kind: Some(CompiledProviderDecisionKind::UniqueProvider),
+                resolution_strategy: Some(CompiledProviderResolutionStrategy::UniqueProvider),
+                failure_reason: None,
+                used_equal_fallback: false,
+                volume_fallback_to_one_count: 0,
+                geography_tier: Some(provider_geography_tier(
+                    supply_region_anchor.location.as_deref(),
+                    provider_meta.location.as_deref(),
+                )),
+                supply_region_source: Some(supply_region_anchor.source),
+                supply_region_location: supply_region_anchor.location.clone(),
+                exchange_location_present: ex.location.is_some(),
+                allocations: vec![CompiledProviderAllocation {
+                    provider_idx,
+                    weight: 1.0,
+                }],
+            });
+            let provider = compiled_process_for_idx(&graph.processes, provider_idx)
+                .ok_or_else(|| anyhow::anyhow!("missing compiled provider idx={provider_idx}"))?;
+            graph.technosphere_edges.push(CompiledTechnosphereEdge {
+                provider_idx,
+                consumer_idx: target_idx,
+                flow_id: ex.flow_id,
+                amount,
+                provider_partition: provider.partition,
+                consumer_partition: target_process.partition,
+                partition: CompiledEdgePartition::from_partitions(
+                    provider.partition,
+                    target_process.partition,
+                ),
+            });
+        } else if candidate_provider_count > 1 {
+            graph.matching_stats.matched_multi_provider += 1;
+            match resolve_multi_provider(
+                provider_rule,
+                ex,
+                providers.ok_or_else(|| anyhow::anyhow!("missing provider list"))?,
+                &process_meta,
+            )? {
+                MultiProviderDecision::Resolved(mut resolution) => {
+                    graph.matching_stats.matched_multi_resolved += 1;
+                    if resolution.used_equal_fallback {
+                        graph.matching_stats.matched_multi_fallback_equal += 1;
+                    }
+                    graph.matching_stats.a_input_edges_written += 1;
+                    if resolution.geography_tier.is_none() {
+                        resolution.geography_tier = best_geography_tier_for_allocations(
+                            supply_region_anchor.location.as_deref(),
+                            &resolution.allocations,
+                            &process_meta,
+                        )?;
+                    }
+                    let allocations = resolution
+                        .allocations
+                        .into_iter()
+                        .map(|(provider_idx, weight)| CompiledProviderAllocation {
+                            provider_idx,
+                            weight,
+                        })
+                        .collect::<Vec<_>>();
+                    graph.provider_decisions.push(CompiledProviderDecision {
+                        consumer_idx: target_idx,
+                        flow_id: ex.flow_id,
+                        candidate_provider_count,
+                        matched_provider_count: i32::try_from(allocations.len())
+                            .map_err(|_| anyhow::anyhow!("provider allocation overflow"))?,
+                        candidates: provider_candidates,
+                        decision_kind: Some(CompiledProviderDecisionKind::MultiResolved),
+                        resolution_strategy: Some(resolution.resolution_strategy),
+                        failure_reason: None,
+                        used_equal_fallback: resolution.used_equal_fallback,
+                        volume_fallback_to_one_count: resolution.volume_fallback_to_one_count,
+                        geography_tier: resolution.geography_tier,
+                        supply_region_source: Some(supply_region_anchor.source),
+                        supply_region_location: supply_region_anchor.location.clone(),
+                        exchange_location_present: ex.location.is_some(),
+                        allocations: allocations.clone(),
+                    });
+                    for allocation in allocations {
+                        let weighted = amount * allocation.weight;
+                        if weighted.abs() <= f64::EPSILON {
+                            continue;
+                        }
+                        let provider =
+                            compiled_process_for_idx(&graph.processes, allocation.provider_idx)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "missing compiled provider idx={}",
+                                        allocation.provider_idx
+                                    )
+                                })?;
+                        graph.technosphere_edges.push(CompiledTechnosphereEdge {
+                            provider_idx: allocation.provider_idx,
+                            consumer_idx: target_idx,
+                            flow_id: ex.flow_id,
+                            amount: weighted,
+                            provider_partition: provider.partition,
+                            consumer_partition: target_process.partition,
+                            partition: CompiledEdgePartition::from_partitions(
+                                provider.partition,
+                                target_process.partition,
+                            ),
+                        });
+                    }
+                }
+                MultiProviderDecision::Unresolved(failure_reason) => {
+                    graph.matching_stats.matched_multi_unresolved += 1;
+                    graph.provider_decisions.push(CompiledProviderDecision {
+                        consumer_idx: target_idx,
+                        flow_id: ex.flow_id,
+                        candidate_provider_count,
+                        matched_provider_count: 0,
+                        candidates: provider_candidates,
+                        decision_kind: Some(CompiledProviderDecisionKind::MultiUnresolved),
+                        resolution_strategy: None,
+                        failure_reason: Some(failure_reason),
+                        used_equal_fallback: false,
+                        volume_fallback_to_one_count: 0,
+                        geography_tier: None,
+                        supply_region_source: Some(supply_region_anchor.source),
+                        supply_region_location: supply_region_anchor.location.clone(),
+                        exchange_location_present: ex.location.is_some(),
+                        allocations: Vec::new(),
+                    });
+                }
+            }
+        } else {
+            graph.matching_stats.unmatched_no_provider += 1;
+            graph.provider_decisions.push(CompiledProviderDecision {
+                consumer_idx: target_idx,
+                flow_id: ex.flow_id,
+                candidate_provider_count: 0,
+                matched_provider_count: 0,
+                candidates: Vec::new(),
+                decision_kind: Some(CompiledProviderDecisionKind::NoProvider),
+                resolution_strategy: None,
+                failure_reason: Some(CompiledProviderFailureReason::NoProviderCandidates),
+                used_equal_fallback: false,
+                volume_fallback_to_one_count: 0,
+                geography_tier: None,
+                supply_region_source: Some(supply_region_anchor.source),
+                supply_region_location: supply_region_anchor.location,
+                exchange_location_present: ex.location.is_some(),
+                allocations: Vec::new(),
+            });
+        }
+    }
+
+    Ok(graph)
+}
+
+fn process_meta_from_compiled(process: &CompiledProcess) -> ProcessMeta {
+    ProcessMeta {
+        process_idx: process.process_idx,
+        process_id: process.process_id,
+        process_version: process.process_version.clone(),
+        process_name: process.process_name.clone(),
+        model_id: process.model_id,
+        location: process.location.clone(),
+        reference_year: process.reference_year,
+        annual_supply_or_production_volume: process.annual_supply_or_production_volume,
+    }
+}
+
+fn review_submit_baseline_scope_summary(
+    scope_summary: &ResolvedRequestScopeSummary,
+    root: &RequestRootProcess,
+) -> anyhow::Result<ResolvedRequestScopeSummary> {
+    let processes = scope_summary
+        .processes
+        .iter()
+        .filter(|process| {
+            !(process.process_id == root.process_id
+                && process.process_version.trim() == root.process_version)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let public_process_count = i64::try_from(
+        processes
+            .iter()
+            .filter(|row| row.partition == ScopeProcessPartition::Public)
+            .count(),
+    )
+    .map_err(|_| anyhow::anyhow!("public process count overflow"))?;
+    let private_process_count = i64::try_from(
+        processes
+            .iter()
+            .filter(|row| row.partition == ScopeProcessPartition::Private)
+            .count(),
+    )
+    .map_err(|_| anyhow::anyhow!("private process count overflow"))?;
+
+    Ok(ResolvedRequestScopeSummary {
+        selection_mode: scope_summary.selection_mode,
+        scope_hash: scope_summary.scope_hash.clone(),
+        roots: scope_summary.roots.clone(),
+        public_process_count,
+        private_process_count,
+        processes,
+    })
+}
+
+fn review_submit_root_dependency_fingerprint(process: &ProcessRow) -> anyhow::Result<String> {
+    let mut exchanges = process_exchange_items(&process.json)
+        .into_iter()
+        .filter_map(|exchange| {
+            let direction = exchange
+                .get("exchangeDirection")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let flow_id = parse_uuid_at(exchange, &["referenceToFlowDataSet", "@refObjectId"])?;
+            Some(serde_json::json!({
+                "direction": direction,
+                "flow_id": flow_id,
+                "location": parse_exchange_location(exchange)
+            }))
+        })
+        .collect::<Vec<_>>();
+    exchanges.sort_by_key(std::string::ToString::to_string);
+    let body = serde_json::json!({
+        "schema": "review-submit-root-dependency-surface:v1",
+        "process_id": process.id,
+        "process_version": process.version,
+        "model_id": process.model_id,
+        "location": parse_process_location(&process.json),
+        "exchanges": exchanges
+    });
+    stable_json_sha256(&body)
+}
+
+fn compute_review_submit_overlay_source_hash(
+    baseline_source_hash: &str,
+    config: &SnapshotBuildConfig,
+) -> anyhow::Result<String> {
+    let body = serde_json::json!({
+        "schema": "review-submit-overlay-source:v1",
+        "baseline_source_hash": baseline_source_hash,
+        "config": config,
+    });
+    stable_json_sha256(&body)
+}
+
+fn stable_json_sha256(value: &Value) -> anyhow::Result<String> {
+    let sorted = sorted_json(value);
+    let bytes = serde_json::to_vec(&sorted)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn sorted_json(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(sorted_json).collect()),
+        Value::Object(map) => {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(key, _)| *key);
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), sorted_json(value)))
+                    .collect::<Map<_, _>>(),
+            )
+        }
+        _ => value.clone(),
     }
 }
 
@@ -1094,6 +2060,26 @@ fn add_technosphere_edge(
     }
 }
 
+fn provider_outputs_from_map(
+    provider_map: &HashMap<Uuid, Vec<i32>>,
+) -> Vec<CompiledProviderOutput> {
+    let mut outputs = provider_map
+        .iter()
+        .flat_map(|(flow_id, providers)| {
+            providers
+                .iter()
+                .copied()
+                .map(|provider_idx| CompiledProviderOutput {
+                    flow_id: *flow_id,
+                    provider_idx,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    outputs.sort_unstable_by_key(|output| (output.flow_id, output.provider_idx));
+    outputs
+}
+
 async fn build_sparse_payload(
     pool: &PgPool,
     snapshot_id: Uuid,
@@ -1138,6 +2124,91 @@ async fn build_sparse_payload(
     )
 }
 
+fn parse_process_chunk(
+    proc_row: &ProcessRow,
+    process_idx: i32,
+    reference_normalization_mode: NormalizationMode,
+    allocation_mode: AllocationMode,
+) -> anyhow::Result<ParsedProcessChunk> {
+    let process_meta = ProcessMeta {
+        process_idx,
+        process_id: proc_row.id,
+        process_version: proc_row.version.clone(),
+        process_name: parse_process_name(&proc_row.json),
+        model_id: proc_row.model_id,
+        location: parse_process_location(&proc_row.json),
+        reference_year: parse_process_reference_year(&proc_row.json),
+        annual_supply_or_production_volume: parse_process_annual_supply_or_production_volume(
+            &proc_row.json,
+        ),
+    };
+    let mut local_exchanges = Vec::new();
+    let mut local_flow_ids = BTreeSet::new();
+    let mut local_allocation = AllocationParseStats::default();
+    let exchange_items = process_exchange_items(&proc_row.json);
+    let (reference_scale, local_reference) = resolve_reference_normalization(
+        proc_row.id,
+        &proc_row.json,
+        &exchange_items,
+        reference_normalization_mode,
+    )?;
+
+    for ex in &exchange_items {
+        let direction = match ex
+            .get("exchangeDirection")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "Input" => Some(ExchangeDirection::Input),
+            "Output" => Some(ExchangeDirection::Output),
+            _ => None,
+        };
+        let Some(direction) = direction else {
+            continue;
+        };
+        let Some(flow_id) = parse_uuid_at(ex, &["referenceToFlowDataSet", "@refObjectId"]) else {
+            continue;
+        };
+        local_allocation.exchange_total += 1;
+        let (allocation_fraction, allocation_state) =
+            resolve_allocation_fraction(ex, allocation_mode)?;
+        match allocation_state {
+            AllocationFractionState::Present => {
+                local_allocation.fraction_present_count += 1;
+            }
+            AllocationFractionState::Missing => {
+                local_allocation.fraction_missing_count += 1;
+            }
+            AllocationFractionState::Invalid => {
+                local_allocation.fraction_invalid_count += 1;
+            }
+        }
+        let amount = parse_number(
+            ex.get("meanAmount")
+                .or_else(|| ex.get("resultingAmount"))
+                .or_else(|| ex.get("meanValue")),
+        )
+        .map(|raw| raw * reference_scale * allocation_fraction);
+
+        local_exchanges.push(ParsedExchange {
+            process_idx,
+            flow_id,
+            direction,
+            amount,
+            location: parse_exchange_location(ex),
+        });
+        local_flow_ids.insert(flow_id);
+    }
+
+    Ok((
+        process_meta,
+        local_exchanges,
+        local_flow_ids,
+        local_reference,
+        local_allocation,
+    ))
+}
+
 async fn compile_scope_graph(
     pool: &PgPool,
     processes: Vec<ProcessRow>,
@@ -1152,86 +2223,15 @@ async fn compile_scope_graph(
     let chunks = processes
         .par_iter()
         .enumerate()
-        .map(|(idx, proc_row)| -> anyhow::Result<ParsedProcessChunk> {
+        .map(|(idx, proc_row)| {
             let process_idx =
                 i32::try_from(idx).map_err(|_| anyhow::anyhow!("process index overflow"))?;
-            let process_meta = ProcessMeta {
+            parse_process_chunk(
+                proc_row,
                 process_idx,
-                process_id: proc_row.id,
-                process_version: proc_row.version.clone(),
-                process_name: parse_process_name(&proc_row.json),
-                model_id: proc_row.model_id,
-                location: parse_process_location(&proc_row.json),
-                reference_year: parse_process_reference_year(&proc_row.json),
-                annual_supply_or_production_volume:
-                    parse_process_annual_supply_or_production_volume(&proc_row.json),
-            };
-            let mut local_exchanges = Vec::new();
-            let mut local_flow_ids = BTreeSet::new();
-            let mut local_allocation = AllocationParseStats::default();
-            let exchange_items = process_exchange_items(&proc_row.json);
-            let (reference_scale, local_reference) = resolve_reference_normalization(
-                proc_row.id,
-                &proc_row.json,
-                &exchange_items,
                 reference_normalization_mode,
-            )?;
-
-            for ex in &exchange_items {
-                let direction = match ex
-                    .get("exchangeDirection")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                {
-                    "Input" => Some(ExchangeDirection::Input),
-                    "Output" => Some(ExchangeDirection::Output),
-                    _ => None,
-                };
-                let Some(direction) = direction else {
-                    continue;
-                };
-                let Some(flow_id) = parse_uuid_at(ex, &["referenceToFlowDataSet", "@refObjectId"])
-                else {
-                    continue;
-                };
-                local_allocation.exchange_total += 1;
-                let (allocation_fraction, allocation_state) =
-                    resolve_allocation_fraction(ex, allocation_mode)?;
-                match allocation_state {
-                    AllocationFractionState::Present => {
-                        local_allocation.fraction_present_count += 1;
-                    }
-                    AllocationFractionState::Missing => {
-                        local_allocation.fraction_missing_count += 1;
-                    }
-                    AllocationFractionState::Invalid => {
-                        local_allocation.fraction_invalid_count += 1;
-                    }
-                }
-                let amount = parse_number(
-                    ex.get("meanAmount")
-                        .or_else(|| ex.get("resultingAmount"))
-                        .or_else(|| ex.get("meanValue")),
-                )
-                .map(|raw| raw * reference_scale * allocation_fraction);
-
-                local_exchanges.push(ParsedExchange {
-                    process_idx,
-                    flow_id,
-                    direction,
-                    amount,
-                    location: parse_exchange_location(ex),
-                });
-                local_flow_ids.insert(flow_id);
-            }
-
-            Ok((
-                process_meta,
-                local_exchanges,
-                local_flow_ids,
-                local_reference,
-                local_allocation,
-            ))
+                allocation_mode,
+            )
         })
         .collect::<Vec<_>>();
 
@@ -1276,6 +2276,7 @@ async fn compile_scope_graph(
             model_id: meta.model_id,
             location: meta.location.clone(),
             reference_year: meta.reference_year,
+            annual_supply_or_production_volume: meta.annual_supply_or_production_volume,
             partition: classify_scope_partition(row, include_user_id),
         });
     }
@@ -1329,6 +2330,7 @@ async fn compile_scope_graph(
         });
         provider_map.insert(flow_id, sorted);
     }
+    let provider_outputs = provider_outputs_from_map(&provider_map);
 
     let mut provider_decisions = Vec::<CompiledProviderDecision>::new();
     let mut technosphere_edges = Vec::<CompiledTechnosphereEdge>::new();
@@ -1549,6 +2551,7 @@ async fn compile_scope_graph(
     Ok(CompiledGraph {
         processes: compiled_processes,
         flows,
+        provider_outputs,
         provider_decisions,
         technosphere_edges,
         biosphere_edges,
@@ -1849,6 +2852,7 @@ fn assemble_sparse_payload(
         coverage,
         snapshot_index,
         readiness,
+        compiled_graph: compiled_graph.clone(),
     })
 }
 
@@ -3100,8 +4104,11 @@ async fn compute_source_fingerprint(
     let (process_count, process_max_modified_at_utc) =
         summarize_selected_processes(selected_processes)?;
     let (flow_count, flow_max_modified_at_utc) = fetch_flow_source_summary(pool).await?;
-    let (lciamethod_count, lciamethod_max_modified_at_utc) =
-        fetch_lciamethod_source_summary(pool).await?;
+    let (lciamethod_count, lciamethod_max_modified_at_utc) = if config.has_lcia {
+        fetch_lciamethod_source_summary(pool).await?
+    } else {
+        (0, "disabled".to_owned())
+    };
 
     let summary = SourceSnapshotSummary {
         process_count,
@@ -3196,6 +4203,17 @@ async fn fetch_lciamethod_source_summary(pool: &PgPool) -> anyhow::Result<(i64, 
 async fn find_reusable_snapshot(
     pool: &PgPool,
     source_fingerprint: &str,
+    reuse_max_age_seconds: Option<i64>,
+) -> anyhow::Result<Option<ReuseCandidate>> {
+    find_reusable_snapshot_with_age_basis(pool, source_fingerprint, reuse_max_age_seconds, false)
+        .await
+}
+
+async fn find_reusable_snapshot_with_age_basis(
+    pool: &PgPool,
+    source_fingerprint: &str,
+    reuse_max_age_seconds: Option<i64>,
+    use_updated_at_for_age: bool,
 ) -> anyhow::Result<Option<ReuseCandidate>> {
     let row = sqlx::query(
         r#"
@@ -3216,12 +4234,27 @@ async fn find_reusable_snapshot(
           AND a.status = 'ready'
           AND a.artifact_format = $2
           AND s.source_hash = $1
-        ORDER BY a.created_at DESC
+          AND (
+            $3::bigint IS NULL
+            OR (
+              CASE
+                WHEN $4::boolean THEN GREATEST(a.created_at, a.updated_at)
+                ELSE a.created_at
+              END
+            ) >= now() - ($3::bigint * interval '1 second')
+          )
+        ORDER BY
+          CASE
+            WHEN $4::boolean THEN GREATEST(a.created_at, a.updated_at)
+            ELSE a.created_at
+          END DESC
         LIMIT 1
         "#,
     )
     .bind(source_fingerprint)
     .bind(SNAPSHOT_ARTIFACT_FORMAT)
+    .bind(reuse_max_age_seconds)
+    .bind(use_updated_at_for_age)
     .fetch_optional(pool)
     .await?;
 
@@ -3246,6 +4279,63 @@ async fn find_reusable_snapshot(
         b_nnz: row.try_get::<i64, _>("b_nnz")?,
         c_nnz: row.try_get::<i64, _>("c_nnz")?,
     }))
+}
+
+async fn touch_reused_snapshot_artifact(
+    pool: &PgPool,
+    snapshot_id: Uuid,
+    artifact_format: &str,
+    refreshed_ttl_seconds: Option<i64>,
+) -> anyhow::Result<()> {
+    let refreshed_expires_at = artifact_expires_at_utc(refreshed_ttl_seconds)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE public.lca_snapshot_artifacts
+        SET updated_at = NOW()
+        WHERE snapshot_id = $1
+          AND artifact_format = $2
+        "#,
+    )
+    .bind(snapshot_id)
+    .bind(artifact_format)
+    .execute(&mut *tx)
+    .await?;
+
+    if let Some(expires_at) = refreshed_expires_at {
+        sqlx::query(
+            r#"
+            UPDATE public.lca_network_snapshots
+            SET
+              updated_at = NOW(),
+              process_filter = jsonb_set(
+                process_filter,
+                '{artifact_lifecycle,expires_at_utc}',
+                to_jsonb($2::text),
+                true
+              )
+            WHERE id = $1
+            "#,
+        )
+        .bind(snapshot_id)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE public.lca_network_snapshots
+            SET updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(snapshot_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn fetch_processes(
@@ -3574,8 +4664,11 @@ async fn persist_snapshot_metadata(
     artifact_sha256: &str,
     artifact_byte_size: i64,
     artifact_format: &str,
+    artifact_purpose: Option<&str>,
+    artifact_expires_in_seconds: Option<i64>,
 ) -> anyhow::Result<()> {
-    let process_filter = if all_states {
+    let artifact_expires_at_utc = artifact_expires_at_utc(artifact_expires_in_seconds)?;
+    let mut process_filter = if all_states {
         serde_json::json!({
             "all_states": true,
             "selection_mode": scope_summary.selection_mode,
@@ -3615,6 +4708,12 @@ async fn persist_snapshot_metadata(
             }
         })
     };
+    attach_artifact_lifecycle(
+        &mut process_filter,
+        artifact_purpose,
+        artifact_expires_in_seconds,
+        artifact_expires_at_utc.as_deref(),
+    );
 
     let mut tx = pool.begin().await?;
     sqlx::query(
@@ -4431,14 +5530,15 @@ fn write_provider_rule_replay_report_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        AllocationMode, Cli, ExchangeDirection, MultiProviderDecision, NormalizationMode,
-        ParsedExchange, ProcessMeta, ProcessRow, ProviderRule, add_technosphere_edge,
-        biosphere_gross_value, candidate_count_bucket_label, compute_scope_hash, geo_score,
-        location_granularity_label, normalize_request_roots,
+        AllocationMode, Cli, ExchangeDirection, MethodSelection, MultiProviderDecision,
+        NormalizationMode, ParsedExchange, ProcessMeta, ProcessRow, ProviderRule,
+        add_technosphere_edge, assemble_sparse_payload, attach_artifact_lifecycle,
+        biosphere_gross_value, build_review_submit_overlay_graph, candidate_count_bucket_label,
+        compute_scope_hash, geo_score, location_granularity_label, normalize_request_roots,
         parse_process_annual_supply_or_production_volume, parse_process_states,
         parse_provider_rule_list, resolve_allocation_fraction, resolve_multi_provider,
-        resolve_process_selection, resolve_reference_normalization, summarize_matching_diagnostics,
-        time_score,
+        resolve_process_selection, resolve_reference_normalization,
+        review_submit_root_dependency_fingerprint, summarize_matching_diagnostics, time_score,
     };
     use chrono::Utc;
     use clap::Parser;
@@ -4447,13 +5547,14 @@ mod tests {
     use uuid::Uuid;
 
     use solver_worker::compiled_graph::{
-        CompiledAllocationStats, CompiledFlow, CompiledGraph, CompiledMatchingStats,
-        CompiledProcess, CompiledProviderAllocation, CompiledProviderDecision,
-        CompiledProviderDecisionKind, CompiledProviderFailureReason, CompiledProviderGeographyTier,
-        CompiledProviderResolutionStrategy, CompiledProviderSupplyRegionSource,
-        CompiledReferenceStats,
+        CompiledAllocationStats, CompiledFlow, CompiledFlowKind, CompiledGraph,
+        CompiledMatchingStats, CompiledProcess, CompiledProviderAllocation,
+        CompiledProviderDecision, CompiledProviderDecisionKind, CompiledProviderFailureReason,
+        CompiledProviderGeographyTier, CompiledProviderOutput, CompiledProviderResolutionStrategy,
+        CompiledProviderSupplyRegionSource, CompiledReferenceStats,
     };
     use solver_worker::graph_types::{RequestRootProcess, ScopeProcessPartition};
+    use solver_worker::pgbouncer_sqlx::postgres::PgPoolOptions;
 
     fn assert_close(actual: f64, expected: f64) {
         let delta = (actual - expected).abs();
@@ -4522,6 +5623,176 @@ mod tests {
     fn snapshot_builder_defaults_to_process_volume_provider_rule() {
         let cli = Cli::parse_from(["snapshot_builder"]);
         assert_eq!(cli.provider_rule, "split_by_process_volume");
+    }
+
+    #[test]
+    fn snapshot_builder_accepts_review_submit_lifecycle_flags() {
+        let cli = Cli::parse_from([
+            "snapshot_builder",
+            "--no-lcia",
+            "--artifact-purpose",
+            "review_submit_overlay",
+            "--artifact-expires-in-seconds",
+            "1209600",
+            "--reuse-max-age-seconds",
+            "1209600",
+        ]);
+
+        assert!(cli.no_lcia);
+        assert_eq!(
+            cli.artifact_purpose.as_deref(),
+            Some("review_submit_overlay")
+        );
+        assert_eq!(cli.artifact_expires_in_seconds, Some(1_209_600));
+        assert_eq!(cli.reuse_max_age_seconds, Some(1_209_600));
+    }
+
+    #[test]
+    fn artifact_lifecycle_metadata_is_attached_to_process_filter() {
+        let mut process_filter = json!({"all_states": false});
+
+        attach_artifact_lifecycle(
+            &mut process_filter,
+            Some("review_submit_overlay"),
+            Some(1_209_600),
+            Some("2026-06-09T00:00:00.000000Z"),
+        );
+
+        assert_eq!(
+            process_filter["artifact_lifecycle"],
+            json!({
+                "purpose": "review_submit_overlay",
+                "ttl_seconds": 1_209_600,
+                "expires_at_utc": "2026-06-09T00:00:00.000000Z"
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_builder_review_submit_dependency_fingerprint_ignores_amount_changes() {
+        let flow_id = fixed_flow_id("shared-flow");
+        let mut left = ProcessRow {
+            id: Uuid::new_v4(),
+            version: "01.00.000".to_owned(),
+            model_id: None,
+            user_id: None,
+            modified_at: Some(Utc::now()),
+            json: process_json(&[("Input", flow_id)]),
+        };
+        let mut right = left.clone();
+        left.json["processDataSet"]["exchanges"]["exchange"][0]["meanAmount"] = json!(1.0);
+        right.json["processDataSet"]["exchanges"]["exchange"][0]["meanAmount"] = json!(25.0);
+
+        assert_eq!(
+            review_submit_root_dependency_fingerprint(&left).expect("left fingerprint"),
+            review_submit_root_dependency_fingerprint(&right).expect("right fingerprint")
+        );
+    }
+
+    #[test]
+    fn snapshot_builder_review_submit_dependency_fingerprint_changes_for_dependency_flow() {
+        let mut left = ProcessRow {
+            id: Uuid::new_v4(),
+            version: "01.00.000".to_owned(),
+            model_id: None,
+            user_id: None,
+            modified_at: Some(Utc::now()),
+            json: process_json(&[("Input", fixed_flow_id("left-flow"))]),
+        };
+        let mut right = left.clone();
+        left.json["processDataSet"]["exchanges"]["exchange"][0]["meanAmount"] = json!(1.0);
+        right.json = process_json(&[("Input", fixed_flow_id("right-flow"))]);
+
+        assert_ne!(
+            review_submit_root_dependency_fingerprint(&left).expect("left fingerprint"),
+            review_submit_root_dependency_fingerprint(&right).expect("right fingerprint")
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_builder_review_submit_overlay_adds_target_to_baseline_graph() {
+        let provider_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let flow_id = fixed_flow_id("shared-flow");
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool");
+        let baseline_graph = CompiledGraph {
+            processes: vec![CompiledProcess {
+                process_idx: 0,
+                process_id: provider_id,
+                process_version: "01.00.000".to_owned(),
+                process_name: Some("provider".to_owned()),
+                model_id: None,
+                location: Some("CN".to_owned()),
+                reference_year: Some(2026),
+                annual_supply_or_production_volume: Some(10.0),
+                partition: ScopeProcessPartition::Public,
+            }],
+            flows: vec![CompiledFlow {
+                flow_idx: 0,
+                flow_id,
+                kind: CompiledFlowKind::Product,
+            }],
+            provider_outputs: vec![CompiledProviderOutput {
+                flow_id,
+                provider_idx: 0,
+            }],
+            provider_decisions: Vec::new(),
+            technosphere_edges: Vec::new(),
+            biosphere_edges: Vec::new(),
+            reference_stats: CompiledReferenceStats {
+                normalized_processes: 1,
+                ..CompiledReferenceStats::default()
+            },
+            allocation_stats: CompiledAllocationStats::default(),
+            matching_stats: CompiledMatchingStats::default(),
+        };
+        let target = ProcessRow {
+            id: target_id,
+            version: "01.00.000".to_owned(),
+            model_id: None,
+            user_id: None,
+            modified_at: Some(Utc::now()),
+            json: process_json(&[("Input", flow_id)]),
+        };
+
+        let overlay_graph = build_review_submit_overlay_graph(
+            &pool,
+            &baseline_graph,
+            &target,
+            None,
+            ProviderRule::SplitByProcessVolume,
+            NormalizationMode::Lenient,
+            AllocationMode::Lenient,
+        )
+        .await
+        .expect("overlay graph");
+        let method = MethodSelection {
+            has_lcia: false,
+            method_id: None,
+            method_version: None,
+            method_count: 0,
+            factor_count: 0,
+        };
+        let built = assemble_sparse_payload(
+            Uuid::new_v4(),
+            &method,
+            &overlay_graph,
+            0.999_999,
+            1e-12,
+            false,
+            &[],
+        )
+        .expect("assemble overlay");
+
+        assert_eq!(overlay_graph.processes.len(), 2);
+        assert_eq!(overlay_graph.provider_decisions.len(), 1);
+        assert_eq!(overlay_graph.technosphere_edges.len(), 1);
+        assert_eq!(overlay_graph.technosphere_edges[0].provider_idx, 0);
+        assert_eq!(overlay_graph.technosphere_edges[0].consumer_idx, 1);
+        assert_eq!(built.data.process_count, 2);
+        assert_eq!(built.coverage.matching.matched_unique_provider, 1);
     }
 
     #[test]
@@ -4700,6 +5971,7 @@ mod tests {
                     model_id: None,
                     location: Some("CN-BJ".to_owned()),
                     reference_year: Some(2026),
+                    annual_supply_or_production_volume: None,
                     partition: ScopeProcessPartition::Public,
                 },
                 CompiledProcess {
@@ -4710,10 +5982,12 @@ mod tests {
                     model_id: None,
                     location: Some("CN".to_owned()),
                     reference_year: Some(2026),
+                    annual_supply_or_production_volume: None,
                     partition: ScopeProcessPartition::Public,
                 },
             ],
             flows: Vec::<CompiledFlow>::new(),
+            provider_outputs: Vec::new(),
             provider_decisions: vec![
                 CompiledProviderDecision {
                     consumer_idx: 0,

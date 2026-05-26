@@ -49,6 +49,8 @@ pub struct CompiledProcess {
     pub model_id: Option<Uuid>,
     pub location: Option<String>,
     pub reference_year: Option<i32>,
+    #[serde(default)]
+    pub annual_supply_or_production_volume: Option<f64>,
     pub partition: ScopeProcessPartition,
 }
 
@@ -175,6 +177,12 @@ pub struct CompiledBiosphereEdge {
     pub process_partition: ScopeProcessPartition,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledProviderOutput {
+    pub flow_id: Uuid,
+    pub provider_idx: i32,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct CompiledReferenceStats {
     pub missing_reference: i64,
@@ -206,6 +214,8 @@ pub struct CompiledMatchingStats {
 pub struct CompiledGraph {
     pub processes: Vec<CompiledProcess>,
     pub flows: Vec<CompiledFlow>,
+    #[serde(default)]
+    pub provider_outputs: Vec<CompiledProviderOutput>,
     pub provider_decisions: Vec<CompiledProviderDecision>,
     pub technosphere_edges: Vec<CompiledTechnosphereEdge>,
     pub biosphere_edges: Vec<CompiledBiosphereEdge>,

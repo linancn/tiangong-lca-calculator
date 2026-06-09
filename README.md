@@ -750,9 +750,11 @@ destructive execute 必须显式传 `--execute`。`maintenance_enqueue` 会为 d
 - payload schema：`national_carbon.process_flow_graph_cache_build.request.v1`
 - 默认 dry-run，只统计将生成的全局图对象；正式写入对象存储时使用 `--execute`
 - 生成对象前缀默认 `national-carbon/process-flow-graph/v1`
-- 输出 active `manifest.json`、`builds/{buildId}/manifest.json`、`graph/*.gz`、`layout/*.gz`、`indexes/*.gz`
-- worker 在构建阶段剔除基础流 `Elementary flow`，生成全量非基础 flow / process / exchange edge 图
-- worker 预计算全局 3D 球面与 2D 展开布局坐标；`expanded2d` 使用关系优先拓扑布局再按轮廓均匀分布，前端只按坐标定位、高亮、拖拽和缩放渲染
+- build schema：`process_flow_graph_v2`
+- 输出 active `manifest.json`、`builds/{buildId}/manifest.json`、`graph/*.gz`、`layout/*.gz`、`indexes/*.gz`、`geo-map/{world,china}/*.gz`
+- worker 在构建阶段剔除基础流 `Elementary flow`，生成全量非基础 flow / process / exchange edge 图，并在节点、flow metadata、process metadata 上同时写入 `clusterIdLevel1` / `clusterIdLevel3`
+- worker 预计算全局 3D 球面与 2D 展开布局坐标；`expanded2d` 按三级分类聚拢节点，再使用关系优先拓扑布局和轮廓均匀分布，前端只按坐标定位、高亮、拖拽和缩放渲染
+- worker 同步产出 `geoMapWorld*` / `geoMapChina*` 视图对象，包含地理投影坐标、可见范围内的边、派生 process-to-process links、搜索索引、L1/L3 cluster 汇总和视图 stats
 
 正式执行示例：
 

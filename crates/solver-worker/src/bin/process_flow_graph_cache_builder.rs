@@ -30,7 +30,8 @@ const DEFAULT_PAGE_SIZE: i64 = 500;
 const MAX_PAGE_SIZE: i64 = 1000;
 const PUBLISHED_STATE_CODE: i32 = 100;
 const ACTIVE_MANIFEST_SCHEMA_VERSION: &str = "process_flow_graph_manifest_v1";
-const BUILD_SCHEMA_VERSION: &str = "process_flow_graph_v1";
+const BUILD_SCHEMA_VERSION: &str = "process_flow_graph_v2";
+const GEO_MAP_VIEW_SCHEMA_VERSION: &str = "process_flow_graph_geo_map_view_v2";
 const EDGE_BINARY_MAGIC: &[u8; 8] = b"PFGEDG1\0";
 const CSR_BINARY_MAGIC: &[u8; 8] = b"PFGCSR1\0";
 const LAYOUT_BINARY_MAGIC: &[u8; 8] = b"PFGLAY1\0";
@@ -44,6 +45,10 @@ const EXPANDED_TOPOLOGY_TARGET_WIDTH: f32 = 1900.0;
 const EXPANDED_TOPOLOGY_TARGET_HEIGHT: f32 = 1250.0;
 const EXPANDED_UNIFORM_OUTLINE_BINS: usize = 144;
 const EXPANDED_UNIFORM_OUTLINE_QUANTILE: f32 = 0.985;
+const WORLD_MAP_WIDTH: f32 = 1120.0;
+const WORLD_MAP_HEIGHT: f32 = 640.0;
+const CHINA_MAP_WIDTH: f32 = 1100.0;
+const CHINA_MAP_HEIGHT: f32 = 720.0;
 
 #[derive(Debug, Parser)]
 #[command(name = "process-flow-graph-cache-builder")]
@@ -123,7 +128,10 @@ struct DatasetRow {
 #[serde(rename_all = "camelCase")]
 struct GraphNode {
     category: String,
-    cluster_id: String,
+    cluster_id_level1: String,
+    cluster_id_level3: String,
+    cluster_label_level1: String,
+    cluster_label_level3: String,
     degree: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     flow_type: Option<String>,
@@ -183,7 +191,10 @@ impl ExchangeDirection {
 #[derive(Debug, Clone)]
 struct FlowMetadata {
     category: String,
-    cluster_id: String,
+    cluster_id_level1: String,
+    cluster_id_level3: String,
+    cluster_label_level1: String,
+    cluster_label_level3: String,
     flow_type: String,
     id: String,
     location: Option<String>,
@@ -194,7 +205,10 @@ struct FlowMetadata {
 #[derive(Debug, Clone)]
 struct ProcessMetadata {
     category: String,
-    cluster_id: String,
+    cluster_id_level1: String,
+    cluster_id_level3: String,
+    cluster_label_level1: String,
+    cluster_label_level3: String,
     id: String,
     location: Option<String>,
     name: String,
@@ -234,6 +248,7 @@ struct BuildSummary {
     build_id: String,
     bucket: String,
     dry_run: bool,
+    geo_maps: Vec<GeoMapSummary>,
     prefix: String,
     stats: BuildStats,
     uploaded_objects: usize,
@@ -320,6 +335,7 @@ struct ProcessFlowGraph {
     edges: Vec<GraphEdge>,
     expanded_layout: Vec<[f32; 3]>,
     flow_by_id: BTreeMap<String, u32>,
+    geo_maps: Vec<GeoMapBuild>,
     nodes: Vec<GraphNode>,
     node_by_id: BTreeMap<String, u32>,
     process_by_id: BTreeMap<String, u32>,
@@ -345,6 +361,89 @@ struct LayoutBounds {
     min_x: f32,
     min_y: f32,
     width: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum GeoMapScope {
+    China,
+    World,
+}
+
+impl GeoMapScope {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::China => "china",
+            Self::World => "world",
+        }
+    }
+
+    const fn frame(self) -> (f32, f32) {
+        match self {
+            Self::China => (CHINA_MAP_WIDTH, CHINA_MAP_HEIGHT),
+            Self::World => (WORLD_MAP_WIDTH, WORLD_MAP_HEIGHT),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeoMapPath {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    id: String,
+    label: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeoMapBackground {
+    height: f32,
+    paths: Vec<GeoMapPath>,
+    scope: GeoMapScope,
+    width: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessLink {
+    direction: ExchangeDirection,
+    exchange_id: String,
+    flow_id: String,
+    id: String,
+    process_id: String,
+    source: String,
+    target: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeoMapSummary {
+    edge_count: usize,
+    node_count: usize,
+    process_link_count: usize,
+    scope: GeoMapScope,
+}
+
+#[derive(Debug, Clone)]
+struct GeoMapBuild {
+    adjacency: BTreeMap<String, Vec<String>>,
+    background: GeoMapBackground,
+    layout: Vec<[f32; 3]>,
+    nodes: Vec<GraphNode>,
+    process_links: Vec<ProcessLink>,
+    scope: GeoMapScope,
+    search_flows: Vec<SearchFlow>,
+    stats: BuildStats,
+    visible_edge_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct GeoAnchor {
+    key: String,
+    x: f32,
+    y: f32,
 }
 
 #[tokio::main]
@@ -751,7 +850,10 @@ impl GraphBuilder {
             .map_err(|_| anyhow::anyhow!("node count exceeds u32"))?;
         self.nodes.push(GraphNode {
             category: flow.category.clone(),
-            cluster_id: flow.cluster_id.clone(),
+            cluster_id_level1: flow.cluster_id_level1.clone(),
+            cluster_id_level3: flow.cluster_id_level3.clone(),
+            cluster_label_level1: flow.cluster_label_level1.clone(),
+            cluster_label_level3: flow.cluster_label_level3.clone(),
             degree: 0,
             flow_type: Some(flow.flow_type.clone()),
             id: node_id.clone(),
@@ -777,7 +879,10 @@ impl GraphBuilder {
             .map_err(|_| anyhow::anyhow!("node count exceeds u32"))?;
         self.nodes.push(GraphNode {
             category: process.category.clone(),
-            cluster_id: process.cluster_id.clone(),
+            cluster_id_level1: process.cluster_id_level1.clone(),
+            cluster_id_level3: process.cluster_id_level3.clone(),
+            cluster_label_level1: process.cluster_label_level1.clone(),
+            cluster_label_level3: process.cluster_label_level3.clone(),
             degree: 0,
             flow_type: None,
             id: node_id.clone(),
@@ -860,20 +965,24 @@ impl GraphBuilder {
         let expanded_layout = create_expanded_layout(&self.nodes, &self.edges);
         let search_flows = build_search_flows(&self.nodes);
 
-        Ok(ProcessFlowGraph {
+        let mut graph = ProcessFlowGraph {
             adjacency_edge_indices,
             adjacency_offsets,
             dictionaries: self.dictionaries,
             edges: self.edges,
             expanded_layout,
             flow_by_id: self.flow_by_id,
+            geo_maps: Vec::new(),
             nodes: self.nodes,
             node_by_id: self.node_by_id,
             process_by_id: self.process_by_id,
             search_flows,
             sphere_layout,
             stats,
-        })
+        };
+        graph.geo_maps = create_geo_map_builds(&graph)?;
+
+        Ok(graph)
     }
 }
 
@@ -971,6 +1080,16 @@ async fn publish_graph(
         build_id: build_id.to_owned(),
         bucket,
         dry_run,
+        geo_maps: graph
+            .geo_maps
+            .iter()
+            .map(|geo_map| GeoMapSummary {
+                edge_count: geo_map.stats.edge_count,
+                node_count: geo_map.nodes.len(),
+                process_link_count: geo_map.process_links.len(),
+                scope: geo_map.scope,
+            })
+            .collect(),
         prefix,
         stats: graph.stats.clone(),
         uploaded_objects: if dry_run { 0 } else { objects.len() },
@@ -1042,7 +1161,7 @@ fn encode_graph_objects(
         process_by_id: graph.process_by_id.clone(),
     };
 
-    Ok(vec![
+    let mut objects = vec![
         encoded_gzip_json(
             format!("{build_prefix}/graph/nodes.json.gz"),
             &nodes_payload,
@@ -1072,6 +1191,14 @@ fn encode_graph_objects(
             &cluster_payload(build_id, &graph.nodes),
         )?,
         encoded_gzip_json(
+            format!("{build_prefix}/layout/clusters-level1.json.gz"),
+            &cluster_level_payload(build_id, &graph.nodes, ClusterLevel::Level1),
+        )?,
+        encoded_gzip_json(
+            format!("{build_prefix}/layout/clusters-level3.json.gz"),
+            &cluster_level_payload(build_id, &graph.nodes, ClusterLevel::Level3),
+        )?,
+        encoded_gzip_json(
             format!("{build_prefix}/indexes/search-flows.json.gz"),
             &json!({
                 "schemaVersion": BUILD_SCHEMA_VERSION,
@@ -1083,7 +1210,18 @@ fn encode_graph_objects(
             format!("{build_prefix}/indexes/node-lookup.json.gz"),
             &lookup_payload,
         )?,
-    ])
+    ];
+
+    for geo_map in &graph.geo_maps {
+        objects.extend(encode_geo_map_objects(
+            &build_prefix,
+            build_id,
+            graph,
+            geo_map,
+        )?);
+    }
+
+    Ok(objects)
 }
 
 fn build_manifest_object(
@@ -1151,6 +1289,16 @@ fn file_key(relative_path: &str) -> &'static str {
         "layout/sphere3d.f32.bin.gz" => "sphere3d",
         "layout/expanded2d.f32.bin.gz" => "expanded2d",
         "layout/clusters.json.gz" => "clusters",
+        "layout/clusters-level1.json.gz" => "clustersLevel1",
+        "layout/clusters-level3.json.gz" => "clustersLevel3",
+        "geo-map/world/view.json.gz" => "geoMapWorldView",
+        "geo-map/world/edges.bin.gz" => "geoMapWorldEdges",
+        "geo-map/world/adjacency.csr.bin.gz" => "geoMapWorldAdjacency",
+        "geo-map/world/layout.f32.bin.gz" => "geoMapWorldLayout",
+        "geo-map/china/view.json.gz" => "geoMapChinaView",
+        "geo-map/china/edges.bin.gz" => "geoMapChinaEdges",
+        "geo-map/china/adjacency.csr.bin.gz" => "geoMapChinaAdjacency",
+        "geo-map/china/layout.f32.bin.gz" => "geoMapChinaLayout",
         "indexes/search-flows.json.gz" => "searchFlows",
         "indexes/node-lookup.json.gz" => "nodeLookup",
         _ => "unknown",
@@ -1279,21 +1427,668 @@ fn push_f64(bytes: &mut Vec<u8>, value: f64) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
-fn cluster_payload(build_id: &str, nodes: &[GraphNode]) -> Value {
-    let mut clusters = BTreeMap::<String, Value>::new();
-    for node in nodes {
-        clusters.entry(node.cluster_id.clone()).or_insert_with(|| {
-            json!({
-                "id": node.cluster_id,
-                "label": node.category,
-            })
-        });
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClusterLevel {
+    Level1,
+    Level3,
+}
+
+fn cluster_fields(node: &GraphNode, level: ClusterLevel) -> (&str, &str) {
+    match level {
+        ClusterLevel::Level1 => (&node.cluster_id_level1, &node.cluster_label_level1),
+        ClusterLevel::Level3 => (&node.cluster_id_level3, &node.cluster_label_level3),
     }
+}
+
+fn collect_clusters(nodes: &[GraphNode], level: ClusterLevel) -> Vec<Value> {
+    let mut clusters = BTreeMap::<String, (String, usize)>::new();
+    for node in nodes {
+        let (id, label) = cluster_fields(node, level);
+        let entry = clusters
+            .entry(id.to_owned())
+            .or_insert_with(|| (label.to_owned(), 0));
+        entry.1 += 1;
+    }
+    clusters
+        .into_iter()
+        .map(|(id, (label, count))| {
+            json!({
+                "id": id,
+                "label": label,
+                "count": count,
+            })
+        })
+        .collect()
+}
+
+fn cluster_level_payload(build_id: &str, nodes: &[GraphNode], level: ClusterLevel) -> Value {
+    let payload_key = match level {
+        ClusterLevel::Level1 => "clustersLevel1",
+        ClusterLevel::Level3 => "clustersLevel3",
+    };
     json!({
         "schemaVersion": BUILD_SCHEMA_VERSION,
         "buildId": build_id,
-        "clusters": clusters.into_values().collect::<Vec<_>>(),
+        payload_key: collect_clusters(nodes, level),
     })
+}
+
+fn cluster_payload(build_id: &str, nodes: &[GraphNode]) -> Value {
+    let clusters_level1 = collect_clusters(nodes, ClusterLevel::Level1);
+    let clusters_level3 = collect_clusters(nodes, ClusterLevel::Level3);
+    json!({
+        "schemaVersion": BUILD_SCHEMA_VERSION,
+        "buildId": build_id,
+        "clusters": clusters_level1.clone(),
+        "clustersLevel1": clusters_level1,
+        "clustersLevel3": clusters_level3,
+    })
+}
+
+fn encode_geo_map_objects(
+    build_prefix: &str,
+    build_id: &str,
+    graph: &ProcessFlowGraph,
+    geo_map: &GeoMapBuild,
+) -> anyhow::Result<Vec<EncodedObject>> {
+    let scope = geo_map.scope.as_str();
+    let units = graph.dictionaries.units.values.clone();
+    let view_payload = json!({
+        "schemaVersion": GEO_MAP_VIEW_SCHEMA_VERSION,
+        "buildId": build_id,
+        "scope": geo_map.scope,
+        "background": geo_map.background,
+        "geoMapFrame": {
+            "width": geo_map.background.width,
+            "height": geo_map.background.height,
+        },
+        "nodes": geo_map.nodes,
+        "processLinks": geo_map.process_links,
+        "adjacency": geo_map.adjacency,
+        "adjacencyIncludesProcessLinks": true,
+        "clustersLevel1": collect_clusters(&geo_map.nodes, ClusterLevel::Level1),
+        "clustersLevel3": collect_clusters(&geo_map.nodes, ClusterLevel::Level3),
+        "searchFlows": geo_map.search_flows,
+        "stats": geo_map.stats,
+        "units": units,
+    });
+
+    Ok(vec![
+        encoded_gzip_json(
+            format!("{build_prefix}/geo-map/{scope}/view.json.gz"),
+            &view_payload,
+        )?,
+        encoded_gzip_binary(
+            format!("{build_prefix}/geo-map/{scope}/edges.bin.gz"),
+            &encode_geo_edges(graph, geo_map)?,
+        )?,
+        encoded_gzip_binary(
+            format!("{build_prefix}/geo-map/{scope}/adjacency.csr.bin.gz"),
+            &encode_geo_adjacency(geo_map)?,
+        )?,
+        encoded_gzip_binary(
+            format!("{build_prefix}/geo-map/{scope}/layout.f32.bin.gz"),
+            &encode_layout(geo_map.nodes.len(), &geo_map.layout)?,
+        )?,
+    ])
+}
+
+fn encode_geo_edges(graph: &ProcessFlowGraph, geo_map: &GeoMapBuild) -> anyhow::Result<Vec<u8>> {
+    let node_index_by_id = geo_map
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.as_str(), u32::try_from(index)))
+        .map(|(id, index)| index.map(|index| (id, index)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let mut bytes = Vec::with_capacity(16 + geo_map.visible_edge_indices.len() * 52);
+    bytes.extend_from_slice(EDGE_BINARY_MAGIC);
+    push_u32(&mut bytes, BINARY_FORMAT_VERSION);
+    push_u32(
+        &mut bytes,
+        u32::try_from(geo_map.visible_edge_indices.len())?,
+    );
+
+    for edge_index in &geo_map.visible_edge_indices {
+        let edge = &graph.edges[*edge_index];
+        let source_id = &graph.nodes[usize::try_from(edge.source_index)?].id;
+        let target_id = &graph.nodes[usize::try_from(edge.target_index)?].id;
+        let flow_id = &graph.nodes[usize::try_from(edge.flow_index)?].id;
+        let process_id = &graph.nodes[usize::try_from(edge.process_index)?].id;
+        let source_index = *node_index_by_id
+            .get(source_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing geo source node: {source_id}"))?;
+        let target_index = *node_index_by_id
+            .get(target_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing geo target node: {target_id}"))?;
+        let flow_index = *node_index_by_id
+            .get(flow_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing geo flow node: {flow_id}"))?;
+        let process_index = *node_index_by_id
+            .get(process_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing geo process node: {process_id}"))?;
+
+        push_u32(&mut bytes, source_index);
+        push_u32(&mut bytes, target_index);
+        push_u32(&mut bytes, flow_index);
+        push_u32(&mut bytes, process_index);
+        bytes.push(edge.direction.as_u8());
+        bytes.push(u8::from(edge.quantitative_reference));
+        push_u16(&mut bytes, 0);
+        push_f64(&mut bytes, edge.mean_amount.unwrap_or(f64::NAN));
+        push_f64(&mut bytes, edge.resulting_amount.unwrap_or(f64::NAN));
+        push_u32(
+            &mut bytes,
+            edge.data_derivation_type_status_idx.unwrap_or(U32_NONE),
+        );
+        push_u32(&mut bytes, edge.exchange_location_idx.unwrap_or(U32_NONE));
+        push_u32(&mut bytes, edge.unit_idx.unwrap_or(U32_NONE));
+        push_u32(&mut bytes, edge.exchange_internal_id.unwrap_or(U32_NONE));
+    }
+
+    Ok(bytes)
+}
+
+fn encode_geo_adjacency(geo_map: &GeoMapBuild) -> anyhow::Result<Vec<u8>> {
+    let visible_edge_ids = geo_map
+        .visible_edge_indices
+        .iter()
+        .enumerate()
+        .map(|(index, edge_index)| (format!("exchange:{edge_index}"), u32::try_from(index)))
+        .map(|(id, index)| index.map(|index| (id, index)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let mut offsets = Vec::with_capacity(geo_map.nodes.len() + 1);
+    let mut edge_references = Vec::<u32>::new();
+    offsets.push(0_u32);
+
+    for node in &geo_map.nodes {
+        for edge_id in geo_map
+            .adjacency
+            .get(&node.id)
+            .into_iter()
+            .flat_map(|edges| edges.iter())
+        {
+            if let Some(edge_index) = visible_edge_ids.get(edge_id) {
+                edge_references.push(*edge_index);
+            }
+        }
+        offsets.push(u32::try_from(edge_references.len())?);
+    }
+
+    let mut bytes = Vec::with_capacity(20 + (offsets.len() + edge_references.len()) * 4);
+    bytes.extend_from_slice(CSR_BINARY_MAGIC);
+    push_u32(&mut bytes, BINARY_FORMAT_VERSION);
+    push_u32(&mut bytes, u32::try_from(geo_map.nodes.len())?);
+    push_u32(&mut bytes, u32::try_from(edge_references.len())?);
+    for value in offsets {
+        push_u32(&mut bytes, value);
+    }
+    for value in edge_references {
+        push_u32(&mut bytes, value);
+    }
+
+    Ok(bytes)
+}
+
+fn create_geo_map_builds(graph: &ProcessFlowGraph) -> anyhow::Result<Vec<GeoMapBuild>> {
+    Ok(vec![
+        create_geo_map_build(graph, GeoMapScope::World)?,
+        create_geo_map_build(graph, GeoMapScope::China)?,
+    ])
+}
+
+fn create_geo_map_build(
+    graph: &ProcessFlowGraph,
+    scope: GeoMapScope,
+) -> anyhow::Result<GeoMapBuild> {
+    let mut anchor_by_node_id = BTreeMap::<String, GeoAnchor>::new();
+    let mut visible_node_indices = Vec::<usize>::new();
+
+    for (index, node) in graph.nodes.iter().enumerate() {
+        if let Some(anchor) = resolve_geo_anchor(node, scope) {
+            anchor_by_node_id.insert(node.id.clone(), anchor);
+            visible_node_indices.push(index);
+        }
+    }
+
+    let visible_node_ids = visible_node_indices
+        .iter()
+        .map(|index| graph.nodes[*index].id.clone())
+        .collect::<BTreeSet<_>>();
+    let nodes = visible_node_indices
+        .iter()
+        .map(|index| graph.nodes[*index].clone())
+        .collect::<Vec<_>>();
+    let visible_edge_indices = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, edge)| {
+            let source_id = &graph.nodes[usize::try_from(edge.source_index).ok()?].id;
+            let target_id = &graph.nodes[usize::try_from(edge.target_index).ok()?].id;
+            (visible_node_ids.contains(source_id) && visible_node_ids.contains(target_id))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let process_links = build_geo_process_links(graph, scope, &visible_node_ids);
+    let adjacency = build_geo_adjacency(graph, &nodes, &visible_edge_indices, &process_links)?;
+    let layout = create_geo_layout(&nodes, &anchor_by_node_id, scope);
+    let search_flows = graph
+        .search_flows
+        .iter()
+        .filter(|flow| visible_node_ids.contains(&flow.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let edge_count = visible_edge_indices.len() + process_links.len();
+    let stats = BuildStats {
+        edge_count,
+        flow_count: nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Flow)
+            .count(),
+        max_degree: nodes
+            .iter()
+            .map(|node| node.degree)
+            .max()
+            .unwrap_or_default(),
+        process_count: nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Process)
+            .count(),
+    };
+
+    Ok(GeoMapBuild {
+        adjacency,
+        background: create_geo_background(scope),
+        layout,
+        nodes,
+        process_links,
+        scope,
+        search_flows,
+        stats,
+        visible_edge_indices,
+    })
+}
+
+fn build_geo_adjacency(
+    graph: &ProcessFlowGraph,
+    nodes: &[GraphNode],
+    visible_edge_indices: &[usize],
+    process_links: &[ProcessLink],
+) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
+    let mut adjacency = nodes
+        .iter()
+        .map(|node| (node.id.clone(), Vec::<String>::new()))
+        .collect::<BTreeMap<_, _>>();
+
+    for edge_index in visible_edge_indices {
+        let edge = &graph.edges[*edge_index];
+        let source_id = &graph.nodes[usize::try_from(edge.source_index)?].id;
+        let target_id = &graph.nodes[usize::try_from(edge.target_index)?].id;
+        let edge_id = format!("exchange:{edge_index}");
+        adjacency
+            .entry(source_id.clone())
+            .or_default()
+            .push(edge_id.clone());
+        adjacency
+            .entry(target_id.clone())
+            .or_default()
+            .push(edge_id);
+    }
+
+    for link in process_links {
+        adjacency
+            .entry(link.source.clone())
+            .or_default()
+            .push(link.id.clone());
+        adjacency
+            .entry(link.target.clone())
+            .or_default()
+            .push(link.id.clone());
+    }
+
+    for edge_ids in adjacency.values_mut() {
+        edge_ids.sort();
+        edge_ids.dedup();
+    }
+
+    Ok(adjacency)
+}
+
+fn create_geo_layout(
+    nodes: &[GraphNode],
+    anchor_by_node_id: &BTreeMap<String, GeoAnchor>,
+    scope: GeoMapScope,
+) -> Vec<[f32; 3]> {
+    let mut nodes_by_anchor = BTreeMap::<String, Vec<usize>>::new();
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(anchor) = anchor_by_node_id.get(&node.id) {
+            nodes_by_anchor
+                .entry(anchor.key.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut seen_by_anchor = BTreeMap::<String, usize>::new();
+    let (frame_width, frame_height) = scope.frame();
+
+    nodes
+        .iter()
+        .map(|node| {
+            let Some(anchor) = anchor_by_node_id.get(&node.id) else {
+                return [0.0, 0.0, get_geo_layout_z(node)];
+            };
+            let seen = seen_by_anchor.entry(anchor.key.clone()).or_default();
+            let anchor_count = nodes_by_anchor.get(&anchor.key).map_or(1, Vec::len).max(1);
+            let point =
+                distribute_geo_anchor(anchor, *seen, anchor_count, frame_width, frame_height);
+            *seen += 1;
+            [point[0], point[1], get_geo_layout_z(node)]
+        })
+        .collect()
+}
+
+fn distribute_geo_anchor(
+    anchor: &GeoAnchor,
+    index: usize,
+    count: usize,
+    frame_width: f32,
+    frame_height: f32,
+) -> [f32; 2] {
+    if count <= 1 {
+        return [anchor.x, anchor.y];
+    }
+    let rank = index as f32 + 0.5;
+    let count_f = count as f32;
+    let angle = rank * GOLDEN_ANGLE + hash_unit(&anchor.key, 3329) * 0.24;
+    let radius = (rank / count_f).sqrt() * (10.0 + count_f.sqrt().min(56.0) * 4.2);
+    let x = (anchor.x + angle.cos() * radius).clamp(-frame_width / 2.0, frame_width / 2.0);
+    let y = (anchor.y + angle.sin() * radius * 0.74).clamp(-frame_height / 2.0, frame_height / 2.0);
+
+    [x, y]
+}
+
+fn get_geo_layout_z(node: &GraphNode) -> f32 {
+    if node.kind == NodeKind::Process {
+        0.6
+    } else {
+        0.0
+    }
+}
+
+fn build_geo_process_links(
+    graph: &ProcessFlowGraph,
+    scope: GeoMapScope,
+    visible_node_ids: &BTreeSet<String>,
+) -> Vec<ProcessLink> {
+    let visible_process_ids = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Process && visible_node_ids.contains(&node.id))
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut edges_by_flow = BTreeMap::<u32, Vec<&GraphEdge>>::new();
+    for edge in &graph.edges {
+        edges_by_flow.entry(edge.flow_index).or_default().push(edge);
+    }
+
+    let mut links = Vec::<ProcessLink>::new();
+    let mut seen = BTreeSet::<String>::new();
+    for (flow_index, flow_edges) in edges_by_flow {
+        let Ok(flow_node_index) = usize::try_from(flow_index) else {
+            continue;
+        };
+        let Some(flow_node) = graph.nodes.get(flow_node_index) else {
+            continue;
+        };
+        let mut providers = BTreeSet::<String>::new();
+        let mut consumers = BTreeSet::<String>::new();
+
+        for edge in flow_edges {
+            let Ok(process_index) = usize::try_from(edge.process_index) else {
+                continue;
+            };
+            let Some(process_node) = graph.nodes.get(process_index) else {
+                continue;
+            };
+            if !visible_process_ids.contains(&process_node.id) {
+                continue;
+            }
+            match edge.direction {
+                ExchangeDirection::Input => {
+                    consumers.insert(process_node.id.clone());
+                }
+                ExchangeDirection::Output => {
+                    providers.insert(process_node.id.clone());
+                }
+            }
+        }
+
+        for source_process_id in &providers {
+            for target_process_id in &consumers {
+                if source_process_id == target_process_id {
+                    continue;
+                }
+                let id = create_process_link_id(
+                    scope,
+                    &flow_node.id,
+                    source_process_id,
+                    target_process_id,
+                );
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                links.push(ProcessLink {
+                    direction: ExchangeDirection::Output,
+                    exchange_id: id.clone(),
+                    flow_id: flow_node.id.clone(),
+                    id,
+                    process_id: target_process_id.clone(),
+                    source: source_process_id.clone(),
+                    target: target_process_id.clone(),
+                });
+            }
+        }
+    }
+
+    links
+}
+
+fn create_process_link_id(
+    scope: GeoMapScope,
+    flow_id: &str,
+    source_process_id: &str,
+    target_process_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(scope.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(flow_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(source_process_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(target_process_id.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+
+    format!("process-link:{}:{}", scope.as_str(), &digest[..20])
+}
+
+fn resolve_geo_anchor(node: &GraphNode, scope: GeoMapScope) -> Option<GeoAnchor> {
+    let location = node.location.as_deref()?.trim().to_ascii_uppercase();
+    if location.is_empty() || location == "NULL" || location == "-" {
+        return None;
+    }
+
+    match scope {
+        GeoMapScope::China => resolve_china_anchor(&location),
+        GeoMapScope::World => resolve_world_anchor(&location),
+    }
+}
+
+fn resolve_world_anchor(location: &str) -> Option<GeoAnchor> {
+    let code = if location == "CN" || location.starts_with("CN-") {
+        "CN"
+    } else if location.len() == 2 && location.chars().all(|ch| ch.is_ascii_uppercase()) {
+        location
+    } else {
+        location.split('-').next().unwrap_or(location)
+    };
+    let (lon, lat) = world_coordinate(code)?;
+    let [x, y] = project_world(lon, lat);
+
+    Some(GeoAnchor {
+        key: format!("world:{code}"),
+        x,
+        y,
+    })
+}
+
+fn resolve_china_anchor(location: &str) -> Option<GeoAnchor> {
+    if location != "CN" && !location.starts_with("CN-") {
+        return None;
+    }
+    let province_code = location.split('-').nth(1).unwrap_or("CN");
+    let (lon, lat) = china_coordinate(province_code)?;
+    let [x, y] = project_china(lon, lat);
+
+    Some(GeoAnchor {
+        key: format!("china:{province_code}"),
+        x,
+        y,
+    })
+}
+
+fn project_world(lon: f32, lat: f32) -> [f32; 2] {
+    [
+        ((lon + 180.0) / 360.0) * WORLD_MAP_WIDTH - WORLD_MAP_WIDTH / 2.0,
+        WORLD_MAP_HEIGHT / 2.0 - ((lat + 90.0) / 180.0) * WORLD_MAP_HEIGHT,
+    ]
+}
+
+fn project_china(lon: f32, lat: f32) -> [f32; 2] {
+    let lon_min = 73.0_f32;
+    let lon_max = 135.0_f32;
+    let lat_min = 18.0_f32;
+    let lat_max = 54.0_f32;
+
+    [
+        ((lon - lon_min) / (lon_max - lon_min)).clamp(0.0, 1.0) * CHINA_MAP_WIDTH
+            - CHINA_MAP_WIDTH / 2.0,
+        CHINA_MAP_HEIGHT / 2.0
+            - ((lat - lat_min) / (lat_max - lat_min)).clamp(0.0, 1.0) * CHINA_MAP_HEIGHT,
+    ]
+}
+
+fn create_geo_background(scope: GeoMapScope) -> GeoMapBackground {
+    let (width, height) = scope.frame();
+    let label = match scope {
+        GeoMapScope::China => "China map frame",
+        GeoMapScope::World => "World map frame",
+    };
+
+    GeoMapBackground {
+        height,
+        paths: vec![GeoMapPath {
+            code: None,
+            id: format!("{}-frame", scope.as_str()),
+            label: label.to_owned(),
+            path: format!("M0 0H{width}V{height}H0Z"),
+        }],
+        scope,
+        width,
+    }
+}
+
+fn world_coordinate(code: &str) -> Option<(f32, f32)> {
+    let coordinate = match code {
+        "AFR" | "RAF" => (20.0, 1.0),
+        "AU" | "OCE" | "PAO" => (137.0, -25.0),
+        "BR" => (-52.0, -10.0),
+        "CA" => (-106.0, 57.0),
+        "CENTREL" => (15.0, 49.0),
+        "CN" | "CPA" | "EAS" => (103.0, 36.0),
+        "DE" => (10.0, 51.0),
+        "EEU" => (24.0, 51.0),
+        "EU+EFTA+UK" | "EU-15" | "EU-25" | "EU-27" | "EU-NMC" | "RER" | "UCTE" | "WEU" => {
+            (10.0, 50.0)
+        }
+        "FR" => (2.0, 47.0),
+        "FSU" => (62.0, 56.0),
+        "GB" | "UK" => (-2.0, 54.0),
+        "GLO" => (0.0, 8.0),
+        "IN" | "SAS" => (78.0, 20.0),
+        "JP" => (138.0, 37.0),
+        "KR" => (128.0, 36.0),
+        "MEA" => (38.0, 25.0),
+        "NO" | "NORDEL" => (18.0, 62.0),
+        "PAS" => (116.0, 7.0),
+        "PT" => (-8.0, 39.5),
+        "RAM" => (-76.0, 8.0),
+        "RAS" => (103.0, 20.0),
+        "RLA" => (-65.0, -16.0),
+        "RME" => (44.0, 27.0),
+        "RNA" => (-101.0, 46.0),
+        "RNE" => (40.0, 31.0),
+        "RU" => (96.0, 61.0),
+        "US" => (-98.0, 39.0),
+        code if code.len() == 2 && code.chars().all(|ch| ch.is_ascii_uppercase()) => {
+            fallback_country_coordinate(code)
+        }
+        _ => return None,
+    };
+
+    Some(coordinate)
+}
+
+fn fallback_country_coordinate(code: &str) -> (f32, f32) {
+    let lon = hash_unit(code, 4301).mul_add(330.0, -165.0);
+    let lat = hash_unit(code, 4303).mul_add(120.0, -55.0);
+
+    (lon, lat)
+}
+
+fn china_coordinate(code: &str) -> Option<(f32, f32)> {
+    let coordinate = match code {
+        "CN" => (104.0, 35.5),
+        "AH" => (117.3, 31.8),
+        "BJ" => (116.4, 39.9),
+        "CQ" => (106.6, 29.6),
+        "FJ" => (119.3, 26.1),
+        "GD" => (113.3, 23.1),
+        "GS" => (103.8, 36.1),
+        "GX" => (108.3, 22.8),
+        "GZ" => (106.7, 26.6),
+        "HA" => (113.6, 34.8),
+        "HB" => (114.3, 30.6),
+        "HE" => (114.5, 38.0),
+        "HI" => (110.3, 20.0),
+        "HK" => (114.2, 22.3),
+        "HL" => (126.6, 45.8),
+        "HN" => (112.9, 28.2),
+        "JL" => (125.3, 43.9),
+        "JS" => (118.8, 32.1),
+        "JX" => (115.9, 28.7),
+        "LN" => (123.4, 41.8),
+        "MO" => (113.5, 22.2),
+        "NM" => (111.7, 40.8),
+        "NX" => (106.3, 38.5),
+        "QH" => (101.8, 36.6),
+        "SC" => (104.1, 30.7),
+        "SD" => (117.0, 36.7),
+        "SH" => (121.5, 31.2),
+        "SN" => (108.9, 34.3),
+        "SX" => (112.6, 37.9),
+        "TJ" => (117.2, 39.1),
+        "TW" => (121.0, 23.7),
+        "XJ" => (87.6, 43.8),
+        "XZ" => (91.1, 29.7),
+        "YN" => (102.7, 25.0),
+        "ZJ" => (120.2, 30.3),
+        _ => return None,
+    };
+
+    Some(coordinate)
 }
 
 fn create_sphere_layout(nodes: &[GraphNode]) -> Vec<[f32; 3]> {
@@ -1755,36 +2550,104 @@ fn create_uniform_silhouette_layout(
 ) -> Vec<[f32; 3]> {
     let [center_x, center_y] = get_layout_center2(base_layout);
     let outline_radii = build_smoothed_outline_radii(base_layout);
-    let mut ordered_nodes = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| (index, hash_unit(&node.id, 1201)))
+    let node_count = nodes.len().max(1) as f32;
+    let mut target_points = (0..nodes.len())
+        .map(|rank| {
+            let sample = rank as f32 + 0.5;
+            let angle = sample * GOLDEN_ANGLE;
+            let radial_progress = (sample / node_count).sqrt();
+            let outline_radius = get_outline_radius_at(&outline_radii, angle);
+            let radius = outline_radius * radial_progress.clamp(0.006, 0.996);
+
+            [
+                center_x + angle.cos() * radius,
+                center_y + angle.sin() * radius,
+            ]
+        })
         .collect::<Vec<_>>();
-    ordered_nodes.sort_by(|(left_index, left_rank), (right_index, right_rank)| {
-        left_rank
-            .total_cmp(right_rank)
+    let target_bounds = summarize_points2(&target_points);
+    target_points.sort_by(|left, right| {
+        spatial_sort_key(*left, target_bounds)
+            .cmp(&spatial_sort_key(*right, target_bounds))
+            .then_with(|| left[0].total_cmp(&right[0]))
+            .then_with(|| left[1].total_cmp(&right[1]))
+    });
+
+    let mut ordered_nodes = nodes.iter().enumerate().collect::<Vec<_>>();
+    ordered_nodes.sort_by(|(left_index, left), (right_index, right)| {
+        left.cluster_id_level3
+            .cmp(&right.cluster_id_level3)
+            .then_with(|| right.degree.cmp(&left.degree))
+            .then_with(|| node_kind_order(left.kind).cmp(&node_kind_order(right.kind)))
+            .then_with(|| left.name.cmp(&right.name))
             .then_with(|| nodes[*left_index].id.cmp(&nodes[*right_index].id))
     });
 
     let mut layout = vec![[0.0_f32, 0.0_f32, 0.0_f32]; nodes.len()];
-    let node_count = nodes.len().max(1) as f32;
-    for (rank, (node_index, _)) in ordered_nodes.into_iter().enumerate() {
-        let node = &nodes[node_index];
-        let sample = rank as f32 + 0.5;
-        let angle = sample * GOLDEN_ANGLE + hash_unit(&node.id, 1211) * 0.08;
-        let radial_progress = (sample / node_count).sqrt();
-        let outline_radius = get_outline_radius_at(&outline_radii, angle);
-        let radius_jitter = (hash_unit(&node.id, 1217) - 0.5) * 0.012;
-        let radius = outline_radius * (radial_progress + radius_jitter).clamp(0.006, 0.996);
+    for (rank, (node_index, node)) in ordered_nodes.into_iter().enumerate() {
+        let [x, y] = target_points
+            .get(rank)
+            .copied()
+            .unwrap_or([center_x, center_y]);
+        let jitter_angle = hash_unit(&node.id, 1211) * std::f32::consts::TAU;
+        let jitter_radius = (hash_unit(&node.id, 1217) - 0.5) * 1.8;
 
         layout[node_index] = [
-            center_x + angle.cos() * radius,
-            center_y + angle.sin() * radius,
+            x + jitter_angle.cos() * jitter_radius,
+            y + jitter_angle.sin() * jitter_radius,
             get_expanded_layout_z(node),
         ];
     }
 
     layout
+}
+
+fn node_kind_order(kind: NodeKind) -> u8 {
+    match kind {
+        NodeKind::Process => 0,
+        NodeKind::Flow => 1,
+    }
+}
+
+fn summarize_points2(points: &[[f32; 2]]) -> LayoutBounds {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for [x, y] in points {
+        min_x = min_x.min(*x);
+        max_x = max_x.max(*x);
+        min_y = min_y.min(*y);
+        max_y = max_y.max(*y);
+    }
+
+    LayoutBounds {
+        height: (max_y - min_y).max(1.0),
+        max_x,
+        max_y,
+        min_x,
+        min_y,
+        width: (max_x - min_x).max(1.0),
+    }
+}
+
+fn spatial_sort_key([x, y]: [f32; 2], bounds: LayoutBounds) -> u64 {
+    let nx = ((x - bounds.min_x) / bounds.width.max(1.0)).clamp(0.0, 1.0);
+    let ny = ((y - bounds.min_y) / bounds.height.max(1.0)).clamp(0.0, 1.0);
+    let gx = (nx * 1023.0).round() as u32;
+    let gy = (ny * 1023.0).round() as u32;
+
+    morton2(gx, gy)
+}
+
+fn morton2(x: u32, y: u32) -> u64 {
+    let mut key = 0_u64;
+    for bit in 0..10 {
+        key |= u64::from((x >> bit) & 1) << (bit * 2);
+        key |= u64::from((y >> bit) & 1) << (bit * 2 + 1);
+    }
+    key
 }
 
 fn build_smoothed_outline_radii(layout: &[[f32; 3]]) -> Vec<f32> {
@@ -2032,10 +2895,14 @@ fn parse_flow_row(row: &DatasetRow) -> Option<FlowMetadata> {
     let category = data_set_info
         .and_then(extract_classification)
         .unwrap_or_else(|| flow_type.clone());
+    let classification = classification_levels(&category);
 
     Some(FlowMetadata {
         category: category.clone(),
-        cluster_id: cluster_id_from_category(&category),
+        cluster_id_level1: cluster_id_from_category_level(&classification, 1),
+        cluster_id_level3: cluster_id_from_category_level(&classification, 3),
+        cluster_label_level1: cluster_label_from_category_level(&classification, 1),
+        cluster_label_level3: cluster_label_from_category_level(&classification, 3),
         flow_type,
         id: row.id.clone(),
         location: None,
@@ -2058,10 +2925,14 @@ fn parse_process_metadata(row: &DatasetRow) -> Option<ProcessMetadata> {
     let category = data_set_info
         .and_then(extract_classification)
         .unwrap_or_else(|| "process".to_owned());
+    let classification = classification_levels(&category);
 
     Some(ProcessMetadata {
         category: category.clone(),
-        cluster_id: cluster_id_from_category(&category),
+        cluster_id_level1: cluster_id_from_category_level(&classification, 1),
+        cluster_id_level3: cluster_id_from_category_level(&classification, 3),
+        cluster_label_level1: cluster_label_from_category_level(&classification, 1),
+        cluster_label_level3: cluster_label_from_category_level(&classification, 3),
         id: row.id.clone(),
         location: process_info
             .and_then(|info| {
@@ -2294,22 +3165,51 @@ fn normalize_exchange_direction(
     }
 }
 
-fn cluster_id_from_category(category: &str) -> String {
-    let head = category
+fn classification_levels(category: &str) -> Vec<String> {
+    let levels = category
         .split('/')
-        .next()
-        .unwrap_or(category)
-        .trim()
-        .to_ascii_lowercase();
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    if levels.is_empty() {
+        vec!["uncategorized".to_owned()]
+    } else {
+        levels
+    }
+}
+
+fn cluster_label_from_category_level(levels: &[String], level: usize) -> String {
+    let take_count = level.clamp(1, levels.len());
+    levels
+        .iter()
+        .take(take_count)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+fn cluster_id_from_category_level(levels: &[String], level: usize) -> String {
+    slug_from_text(&cluster_label_from_category_level(levels, level))
+}
+
+fn slug_from_text(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
     let mut slug = String::new();
-    for ch in head.chars() {
+    for ch in normalized.chars() {
         if ch.is_ascii_alphanumeric() {
             slug.push(ch);
         } else if !slug.ends_with('-') {
             slug.push('-');
         }
     }
-    slug.trim_matches('-').to_owned()
+    let slug = slug.trim_matches('-').to_owned();
+    if slug.is_empty() {
+        "uncategorized".to_owned()
+    } else {
+        slug
+    }
 }
 
 fn extract_unit_hint(text: &str) -> Option<String> {
@@ -2332,7 +3232,8 @@ mod tests {
 
     use super::DatasetRow;
     use super::{
-        Cli, ExchangeDirection, build_graph, encoded_gzip_json, normalize_exchange_direction,
+        Cli, ExchangeDirection, GeoMapScope, build_graph, cluster_payload, encoded_gzip_json,
+        normalize_exchange_direction,
     };
 
     fn test_cli() -> Cli {
@@ -2380,6 +3281,24 @@ mod tests {
                 }
             }),
         }
+    }
+
+    fn flow_row_with_category(
+        id: &str,
+        name: &str,
+        flow_type: &str,
+        categories: &[&str],
+    ) -> DatasetRow {
+        let mut row = flow_row(id, name, flow_type);
+        row.json["flowDataSet"]["flowInformation"]["dataSetInformation"]["classificationInformation"] = json!({
+            "common:classification": {
+                "common:class": categories
+                    .iter()
+                    .map(|category| json!({"@xml:lang": "en", "#text": category}))
+                    .collect::<Vec<_>>()
+            }
+        });
+        row
     }
 
     fn process_row() -> DatasetRow {
@@ -2442,6 +3361,59 @@ mod tests {
         }
     }
 
+    fn process_row_for_flow(
+        id: &str,
+        location: &str,
+        flow_id: &str,
+        direction: &str,
+    ) -> DatasetRow {
+        DatasetRow {
+            id: id.to_owned(),
+            version: "01.00.000".to_owned(),
+            modified_at: None,
+            json: json!({
+                "processDataSet": {
+                    "processInformation": {
+                        "dataSetInformation": {
+                            "name": {"baseName": [{"@xml:lang": "zh", "#text": id}]},
+                            "classificationInformation": {
+                                "common:classification": {
+                                    "common:class": [
+                                        {"@xml:lang": "en", "#text": "Manufacturing"},
+                                        {"@xml:lang": "en", "#text": "Power"},
+                                        {"@xml:lang": "en", "#text": "Solar"}
+                                    ]
+                                }
+                            }
+                        },
+                        "geography": {
+                            "locationOfOperationSupplyOrProduction": {
+                                "@location": location
+                            }
+                        }
+                    },
+                    "administrativeInformation": {
+                        "publicationAndOwnership": {"common:dataSetVersion": "01.00.000"}
+                    },
+                    "exchanges": {
+                        "exchange": [
+                            {
+                                "@dataSetInternalID": "1",
+                                "referenceToFlowDataSet": {
+                                    "@refObjectId": flow_id,
+                                    "@version": "01.00.000"
+                                },
+                                "exchangeDirection": direction,
+                                "meanAmount": "1",
+                                "resultingAmount": "1"
+                            }
+                        ]
+                    }
+                }
+            }),
+        }
+    }
+
     #[test]
     fn output_flow_process_preserves_other_non_basic_outputs() {
         let flows = vec![
@@ -2478,6 +3450,84 @@ mod tests {
         assert_eq!(
             normalize_exchange_direction(None, false),
             ExchangeDirection::Input
+        );
+    }
+
+    #[test]
+    fn nodes_emit_level1_and_level3_cluster_contract() {
+        let flows = vec![flow_row_with_category(
+            "flow-a",
+            "Flow A",
+            "Product flow",
+            &["Energy", "Electricity", "Solar"],
+        )];
+        let processes = vec![process_row_for_flow(
+            "process-a",
+            "CN-GD",
+            "flow-a",
+            "Input",
+        )];
+        let graph = build_graph(&flows, &processes, &test_cli()).expect("graph");
+        let flow_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "flow:flow-a@01.00.000")
+            .expect("flow node");
+
+        assert_eq!(flow_node.cluster_id_level1, "energy");
+        assert_eq!(flow_node.cluster_id_level3, "energy-electricity-solar");
+        assert_eq!(flow_node.cluster_label_level1, "Energy");
+        assert_eq!(
+            flow_node.cluster_label_level3,
+            "Energy / Electricity / Solar"
+        );
+
+        let payload = cluster_payload("test", &graph.nodes);
+        assert_eq!(payload["schemaVersion"], "process_flow_graph_v2");
+        assert!(payload["clustersLevel1"].as_array().expect("l1").len() >= 2);
+        assert!(payload["clustersLevel3"].as_array().expect("l3").len() >= 2);
+    }
+
+    #[test]
+    fn geo_map_cache_builds_china_scope_with_process_links() {
+        let flows = vec![flow_row("flow-a", "Flow A", "Product flow")];
+        let processes = vec![
+            process_row_for_flow("provider", "CN-GD", "flow-a", "Output"),
+            process_row_for_flow("consumer", "CN-GD", "flow-a", "Input"),
+        ];
+        let graph = build_graph(&flows, &processes, &test_cli()).expect("graph");
+        let china = graph
+            .geo_maps
+            .iter()
+            .find(|geo_map| geo_map.scope == GeoMapScope::China)
+            .expect("china geo map");
+
+        assert_eq!(china.nodes.len(), 2);
+        assert_eq!(china.visible_edge_indices.len(), 0);
+        assert_eq!(china.process_links.len(), 1);
+        assert_eq!(china.stats.edge_count, 1);
+        assert!(
+            china
+                .background
+                .paths
+                .iter()
+                .all(|path| !path.path.is_empty())
+        );
+        assert!(
+            china
+                .layout
+                .iter()
+                .all(|position| position.iter().all(|value| value.is_finite()))
+        );
+        assert!(
+            china
+                .adjacency
+                .values()
+                .filter(|edges| edges
+                    .iter()
+                    .any(|edge| edge.starts_with("process-link:china:")))
+                .count()
+                >= 2
         );
     }
 

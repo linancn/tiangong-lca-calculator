@@ -21,8 +21,8 @@ checkPaths:
   - docs/review-submit-fast-gate-contract.md
   - docs/edge-function-integration.md
   - docs/frontend-integration.md
-lastReviewedAt: 2026-06-08
-lastReviewedCommit: b3ea058f0cda4824c65976aac7a64d005028039d
+lastReviewedAt: 2026-06-09
+lastReviewedCommit: 2d0ec9d6734238a3e6926e7ceab88611627d5571
 related:
   - AGENTS.md
   - .docpact/config.yaml

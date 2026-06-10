@@ -1,4 +1,5 @@
 #![allow(
+    clippy::approx_constant,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
@@ -461,8 +462,7 @@ struct GeoMapBuild {
 #[derive(Debug, Clone)]
 struct GeoAnchor {
     key: String,
-    radius_x: f32,
-    radius_y: f32,
+    samples: &'static [[f32; 2]],
     x: f32,
     y: f32,
 }
@@ -1869,25 +1869,45 @@ fn distribute_geo_anchor(
     frame_width: f32,
     frame_height: f32,
 ) -> [f32; 2] {
-    if count <= 1 {
-        return [anchor.x, anchor.y];
+    if !anchor.samples.is_empty() {
+        let sample_index = select_geo_anchor_sample(anchor, node_id, index, count);
+        let [x, y] = anchor.samples[sample_index];
+        return [
+            x.clamp(-frame_width / 2.0, frame_width / 2.0),
+            y.clamp(-frame_height / 2.0, frame_height / 2.0),
+        ];
     }
-    let rank = index as f32 + 0.5;
-    let count_f = count as f32;
-    let hash_key = format!("{}:{node_id}", anchor.key);
-    let angle = rank.mul_add(
-        GOLDEN_ANGLE,
-        hash_unit(&hash_key, 3329) * std::f32::consts::TAU,
-    );
-    let radius = (rank / count_f).sqrt();
-    let coverage = (0.34 + count_f.ln_1p() * 0.13).clamp(0.42, 1.0);
-    let jitter = 0.86 + hash_unit(&hash_key, 3331) * 0.18;
-    let x = (anchor.x + angle.cos() * anchor.radius_x * radius * coverage * jitter)
-        .clamp(-frame_width / 2.0, frame_width / 2.0);
-    let y = (anchor.y + angle.sin() * anchor.radius_y * radius * coverage * jitter)
-        .clamp(-frame_height / 2.0, frame_height / 2.0);
 
-    [x, y]
+    [anchor.x, anchor.y]
+}
+
+fn select_geo_anchor_sample(
+    anchor: &GeoAnchor,
+    node_id: &str,
+    index: usize,
+    count: usize,
+) -> usize {
+    let sample_count = anchor.samples.len();
+    if sample_count <= 1 {
+        return 0;
+    }
+
+    let hash_key = format!("{}:{node_id}", anchor.key);
+    if count == 0 || count > sample_count {
+        return (hash_unit(&hash_key, 3331) * sample_count as f32)
+            .floor()
+            .min((sample_count - 1) as f32) as usize;
+    }
+
+    let bucket_start = index.saturating_mul(sample_count) / count;
+    let bucket_end = ((index + 1).saturating_mul(sample_count)).div_ceil(count);
+    let bucket_end = bucket_end.clamp(bucket_start + 1, sample_count);
+    let bucket_len = bucket_end - bucket_start;
+    let bucket_offset = (hash_unit(&hash_key, 3337) * bucket_len as f32)
+        .floor()
+        .min((bucket_len - 1) as f32) as usize;
+
+    bucket_start + bucket_offset
 }
 
 fn get_geo_layout_z(node: &GraphNode) -> f32 {
@@ -2013,8 +2033,7 @@ fn resolve_world_anchor(location: &str) -> Option<GeoAnchor> {
 
     Some(GeoAnchor {
         key: format!("world:{}", shape.key),
-        radius_x: shape.radius_x,
-        radius_y: shape.radius_y,
+        samples: shape.samples,
         x: shape.x,
         y: shape.y,
     })
@@ -2026,8 +2045,7 @@ fn resolve_china_anchor(location: &str) -> Option<GeoAnchor> {
 
     Some(GeoAnchor {
         key: format!("china:{}", shape.key),
-        radius_x: shape.radius_x,
-        radius_y: shape.radius_y,
+        samples: shape.samples,
         x: shape.x,
         y: shape.y,
     })
@@ -3271,9 +3289,10 @@ mod tests {
 
     use super::DatasetRow;
     use super::{
-        Cli, ExchangeDirection, GEO_LOCATION_RULE_VERSION, GeoMapScope, build_graph,
-        cluster_payload, encoded_gzip_json, normalize_exchange_direction,
-        resolve_china_province_code, resolve_world_region_key,
+        CHINA_REGION_SHAPES, Cli, ExchangeDirection, GEO_LOCATION_RULE_VERSION, GeoMapScope,
+        WORLD_REGION_SHAPES, build_graph, cluster_payload, encoded_gzip_json,
+        find_geo_region_shape, normalize_exchange_direction, resolve_china_province_code,
+        resolve_world_region_key,
     };
 
     fn test_cli() -> Cli {
@@ -3578,6 +3597,13 @@ mod tests {
         }
         assert_eq!(resolve_world_region_key("UK").as_deref(), Some("GB"));
         assert_eq!(resolve_world_region_key("CN-GD-SZX").as_deref(), Some("CN"));
+        assert!(
+            find_geo_region_shape(WORLD_REGION_SHAPES, "CN")
+                .expect("CN world shape")
+                .samples
+                .len()
+                >= 1_800
+        );
 
         for code in ["BV", "EU-27", "GI", "GLO", "RER", "UM"] {
             assert!(resolve_world_region_key(code).is_none());
@@ -3586,6 +3612,13 @@ mod tests {
         assert_eq!(resolve_china_province_code("CN-GD"), Some("GD"));
         assert_eq!(resolve_china_province_code("CN-GD-SZX"), Some("GD"));
         assert_eq!(resolve_china_province_code("CN-HK"), Some("HK"));
+        assert!(
+            find_geo_region_shape(CHINA_REGION_SHAPES, "GD")
+                .expect("GD province shape")
+                .samples
+                .len()
+                >= 300
+        );
         assert!(resolve_china_province_code("CN").is_none());
         assert!(resolve_china_province_code("HK").is_none());
         assert!(resolve_china_province_code("CN-XX").is_none());
@@ -3685,9 +3718,20 @@ mod tests {
                 )
             })
             .collect::<BTreeSet<_>>();
+        let gd_sample_points = find_geo_region_shape(CHINA_REGION_SHAPES, "GD")
+            .expect("GD province shape")
+            .samples
+            .iter()
+            .map(|[x, y]| ((*x * 10.0).round() as i32, (*y * 10.0).round() as i32))
+            .collect::<BTreeSet<_>>();
 
         assert_eq!(china.nodes.len(), 12);
         assert!(unique_points.len() >= 10);
+        assert!(
+            unique_points
+                .iter()
+                .all(|point| gd_sample_points.contains(point))
+        );
     }
 
     #[test]
